@@ -2150,22 +2150,106 @@ with abas[4]:
 
     # SUB-ABA 5.3: HISTÓRICO DE REEMBOLSOS RECEBIDOS
     with sub_abas_terceiros[2]:
-        st.markdown("**Histórico de Pagamentos e Reembolsos Concluídos**")
-        
-        pessoa_cartao_paga = [t for t in dados.get("gastos_terceiros_cartao", []) if t["pago"]]
-        pessoa_emprestimo_pago = [e for e in dados.get("gastos_terceiros_emprestimo", []) if e["pago"]]
-        
-        if not pessoa_cartao_paga and not pessoa_emprestimo_pago:
-            st.info("Nenhum reembolso completo registrado até o momento.")
+        st.markdown(f"**Pagamentos e Reembolsos Recebidos em {mes_selecionado}/{ano_selecionado}**")
+        st.caption("Cada reembolso aparece apenas no mês em que foi efetivamente pago — não fica repetido nos meses seguintes.")
+
+        def data_pagamento_de(item):
+            return item.get("data_pagamento", item["data"])
+
+        pessoa_cartao_paga_mes = [
+            t for t in dados.get("gastos_terceiros_cartao", [])
+            if t["pago"] and str(data_pagamento_de(t))[:7] == periodo_ativo
+        ]
+        pessoa_emprestimo_pago_mes = [
+            e for e in dados.get("gastos_terceiros_emprestimo", [])
+            if e["pago"] and str(data_pagamento_de(e))[:7] == periodo_ativo
+        ]
+
+        if not pessoa_cartao_paga_mes and not pessoa_emprestimo_pago_mes:
+            st.info("Nenhum reembolso recebido neste mês.")
         else:
-            if pessoa_cartao_paga:
+            if pessoa_cartao_paga_mes:
                 st.markdown("**💳 Compras no Cartão (Pagas/Reembolsadas):**")
-                for t in pessoa_cartao_paga:
-                    st.write(f"- **{formatar_data_br(t['data'])}**: {t['nome']} pagou: **R$ {t['valor']:,.2f}** - *({t['descricao']})*")
-            if pessoa_emprestimo_pago:
+                for idx_hc, t in enumerate(dados["gastos_terceiros_cartao"]):
+                    if t not in pessoa_cartao_paga_mes:
+                        continue
+                    col_hc1, col_hc2 = st.columns([4, 1])
+                    col_hc1.write(f"- **{formatar_data_br(data_pagamento_de(t))}**: {t['nome']} pagou: **R$ {t['valor']:,.2f}** - *({t['descricao']})*")
+                    del_hc_key = f"delhist_c_{idx_hc}"
+                    if col_hc2.button("🗑️", key=f"btn_{del_hc_key}"):
+                        st.session_state[del_hc_key] = True
+                    if st.session_state.get(del_hc_key):
+                        st.warning("Excluir este registro do histórico? (não mexe no saldo, só remove da lista)")
+                        c_s, c_n = st.columns(2)
+                        if c_s.button("Confirmar exclusão", key=f"conf_{del_hc_key}"):
+                            dados["gastos_terceiros_cartao"].pop(idx_hc)
+                            salvar_dados_usuario(usuario_atual, dados)
+                            del st.session_state[del_hc_key]
+                            st.rerun()
+                        if c_n.button("Cancelar", key=f"canc_{del_hc_key}"):
+                            del st.session_state[del_hc_key]
+                            st.rerun()
+
+            if pessoa_emprestimo_pago_mes:
                 st.markdown("**💸 Empréstimos (Quitados/Recebidos):**")
-                for e in pessoa_emprestimo_pago:
-                    st.write(f"- **{formatar_data_br(e['data'])}**: {e['nome']} quitou: **R$ {e['valor']:,.2f}** - *({e['descricao']})* -> Destino: {e.get('conta_destino', 'Nu')} ({e.get('forma_recebimento', 'PIX')})")
+                for idx_he, e in enumerate(dados["gastos_terceiros_emprestimo"]):
+                    if e not in pessoa_emprestimo_pago_mes:
+                        continue
+                    col_he1, col_he2 = st.columns([4, 1])
+                    col_he1.write(f"- **{formatar_data_br(data_pagamento_de(e))}**: {e['nome']} quitou: **R$ {e['valor']:,.2f}** - *({e['descricao']})* -> Destino: {e.get('conta_destino', 'Nu')} ({e.get('forma_recebimento', 'PIX')})")
+                    del_he_key = f"delhist_e_{idx_he}"
+                    if col_he2.button("🗑️", key=f"btn_{del_he_key}"):
+                        st.session_state[del_he_key] = True
+                    if st.session_state.get(del_he_key):
+                        st.warning("Excluir este registro do histórico? (não mexe no saldo, só remove da lista)")
+                        c_s, c_n = st.columns(2)
+                        if c_s.button("Confirmar exclusão", key=f"conf_{del_he_key}"):
+                            dados["gastos_terceiros_emprestimo"].pop(idx_he)
+                            salvar_dados_usuario(usuario_atual, dados)
+                            del st.session_state[del_he_key]
+                            st.rerun()
+                        if c_n.button("Cancelar", key=f"canc_{del_he_key}"):
+                            del st.session_state[del_he_key]
+                            st.rerun()
+
+        # --- RELATÓRIO SIMPLES POR DEVEDOR (visão geral, não limitado ao mês) ---
+        st.markdown("---")
+        st.markdown("### 📋 Relatório por Devedor")
+        st.caption("Resumo geral de cada pessoa: quanto já foi pago (histórico completo) e quanto ainda falta. Você pode limpar o histórico pago de uma pessoa para não acumular registros antigos.")
+
+        todos_nomes = sorted(set(
+            [t["nome"] for t in dados.get("gastos_terceiros_cartao", [])] +
+            [e["nome"] for e in dados.get("gastos_terceiros_emprestimo", [])]
+        ))
+
+        if not todos_nomes:
+            st.info("Nenhum devedor cadastrado ainda.")
+        else:
+            for nome_rel in todos_nomes:
+                cartao_pessoa = [t for t in dados.get("gastos_terceiros_cartao", []) if t["nome"].lower() == nome_rel.lower()]
+                emp_pessoa = [e for e in dados.get("gastos_terceiros_emprestimo", []) if e["nome"].lower() == nome_rel.lower()]
+
+                total_pago_pessoa = sum(t["valor"] for t in cartao_pessoa if t["pago"]) + sum(e["valor"] for e in emp_pessoa if e["pago"])
+                total_pendente_pessoa = sum(t["valor"] for t in cartao_pessoa if not t["pago"]) + sum(e["valor"] for e in emp_pessoa if not e["pago"])
+                qtd_pagos_pessoa = len([t for t in cartao_pessoa if t["pago"]]) + len([e for e in emp_pessoa if e["pago"]])
+
+                with st.expander(f"👤 {nome_rel} — Pago: R$ {total_pago_pessoa:,.2f} | Falta: R$ {total_pendente_pessoa:,.2f}"):
+                    col_rel1, col_rel2 = st.columns(2)
+                    col_rel1.metric("✅ Já pago (histórico)", f"R$ {total_pago_pessoa:,.2f}")
+                    col_rel2.metric("⏳ Ainda falta", f"R$ {total_pendente_pessoa:,.2f}")
+
+                    if qtd_pagos_pessoa > 0:
+                        st.markdown("---")
+                        confirma_limpa_pessoa = st.checkbox(
+                            f"Confirmo que quero apagar os {qtd_pagos_pessoa} registro(s) já pagos de {nome_rel} (o que ainda falta não é afetado)",
+                            key=f"chk_limpa_hist_{nome_rel}"
+                        )
+                        if st.button(f"🗑️ Limpar histórico pago de {nome_rel}", key=f"limpa_hist_{nome_rel}", disabled=not confirma_limpa_pessoa):
+                            dados["gastos_terceiros_cartao"] = [t for t in dados["gastos_terceiros_cartao"] if not (t["nome"].lower() == nome_rel.lower() and t["pago"])]
+                            dados["gastos_terceiros_emprestimo"] = [e for e in dados["gastos_terceiros_emprestimo"] if not (e["nome"].lower() == nome_rel.lower() and e["pago"])]
+                            salvar_dados_usuario(usuario_atual, dados)
+                            st.success(f"Histórico pago de {nome_rel} foi limpo.")
+                            st.rerun()
 
 # ----------------- ABA 6: NOVA ABA SALDOS (CONTAS DINÂMICAS & FATURAS DE CARTÃO) -----------------
 with abas[5]:
