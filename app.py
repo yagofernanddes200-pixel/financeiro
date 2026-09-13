@@ -82,6 +82,11 @@ st.markdown("""
     .stButton>button:hover {
         background-color: #9466FF !important;
     }
+    .stButton>button:disabled {
+        background-color: #3A3A40 !important;
+        color: #7A7A82 !important;
+        cursor: not-allowed;
+    }
     
     /* Inputs */
     div[data-baseweb="input"] {
@@ -753,17 +758,32 @@ if not st.session_state.autenticado:
     st.markdown(f"### 🔒 Acesso Restrito - Perfil: **{usuario_atual}**")
     st.markdown("Por segurança, digite sua senha de 6 dígitos para acessar seus dados.")
     
-    pin_digitado = st.text_input("Digite o PIN de 6 dígitos:", type="password", max_chars=6)
+    tentativas_key = f"tentativas_login_{usuario_atual}"
+    if tentativas_key not in st.session_state:
+        st.session_state[tentativas_key] = 0
+
+    bloqueado = st.session_state[tentativas_key] >= 5
+
+    if bloqueado:
+        st.error("🚫 Muitas tentativas incorretas. Recarregue a página para tentar novamente.")
+
+    pin_digitado = st.text_input("Digite o PIN de 6 dígitos:", type="password", max_chars=6, disabled=bloqueado)
     
     col_btn_login, col_btn_perfil = st.columns(2)
     with col_btn_login:
-        if st.button("Entrar 🔓"):
+        if st.button("Entrar 🔓", disabled=bloqueado):
             if pin_digitado == dados.get("pin", "123456"):
                 st.session_state.autenticado = True
+                st.session_state[tentativas_key] = 0
                 st.success("Acesso liberado!")
                 st.rerun()
             else:
-                st.error("PIN incorreto! Tente novamente.")
+                st.session_state[tentativas_key] += 1
+                restantes = 5 - st.session_state[tentativas_key]
+                if restantes > 0:
+                    st.error(f"PIN incorreto! Tentativas restantes: {restantes}.")
+                else:
+                    st.rerun()
                 
     with col_btn_perfil:
         novo_usuario = st.selectbox("Trocar de Perfil:", ["Yago", "Binete", "Criar Novo Perfil"])
@@ -823,6 +843,16 @@ abas = st.tabs(["📊 Resumo", "💵 Ganhos", "🏠 Fixas", "🛍️ Avulsos", "
 with abas[0]:
     st.markdown(f"<h3 class='titulo-secao'>📊 Painel Financeiro ({mes_selecionado}/{ano_selecionado})</h3>", unsafe_allow_html=True)
     
+    saldo_todas_contas = sum(c["saldo"] for c in dados.get("contas", []))
+    faturas_abertas = sum(c["fatura"] for c in dados.get("cartoes", []))
+    patrimonio_liquido = saldo_todas_contas - faturas_abertas
+
+    col_pl1, col_pl2, col_pl3 = st.columns(3)
+    col_pl1.metric("Saldo em Contas", f"R$ {saldo_todas_contas:,.2f}")
+    col_pl2.metric("Faturas em Aberto", f"R$ {faturas_abertas:,.2f}")
+    col_pl3.metric("Patrimônio Líquido", f"R$ {patrimonio_liquido:,.2f}")
+    st.markdown("---")
+
     tipo_relatorio = st.radio("Escolha o tipo de Relatório:", ["Relatório Mensal", "Relatório Anual"], horizontal=True)
     
     if tipo_relatorio == "Relatório Mensal":
@@ -1041,17 +1071,44 @@ with abas[1]:
     receitas_mes = [r for r in dados.get("receitas", []) if r["data"].startswith(periodo_ativo)]
     if receitas_mes:
         st.markdown("#### Suas Receitas Registradas neste Mês")
-        df_rec = pd.DataFrame(receitas_mes)
-        if "conta" not in df_rec.columns:
-            df_rec["conta"] = "Não especificada"
-        df_rec = df_rec[["data", "descricao", "conta", "valor"]]
-        df_rec.columns = ["Data", ["Descrição"], "Conta", "Valor (R$)"]
-        st.dataframe(df_rec, use_container_width=True)
-        
-        if st.button("Limpar Histórico de Receitas (Mês)", key="limpar_rec"):
-            dados["receitas"] = [r for r in dados.get("receitas", []) if not r["data"].startswith(periodo_ativo)]
-            salvar_dados_usuario(usuario_atual, dados)
-            st.rerun()
+
+        filtro_rec = st.text_input("🔎 Buscar por descrição:", key="filtro_receitas")
+
+        for idx, item in enumerate(dados["receitas"]):
+            if not item["data"].startswith(periodo_ativo):
+                continue
+            if filtro_rec and filtro_rec.lower() not in item["descricao"].lower():
+                continue
+
+            col_d, col_v, col_del = st.columns([3, 2, 1])
+            col_d.markdown(f"**{item['descricao']}**\n\n*{item['data']} — {item.get('conta', 'Não especificada')}*")
+            col_v.markdown(f"R$ {item['valor']:,.2f}")
+
+            confirm_key = f"confirma_del_rec_{idx}"
+            if col_del.button("🗑️", key=f"del_rec_{idx}", help="Excluir este lançamento"):
+                st.session_state[confirm_key] = True
+
+            if st.session_state.get(confirm_key):
+                st.warning(f"Excluir '{item['descricao']}' (R$ {item['valor']:,.2f})? Isso também estorna o valor da conta '{item.get('conta', '')}'.")
+                c_sim, c_nao = st.columns(2)
+                if c_sim.button("Sim, excluir", key=f"conf_sim_rec_{idx}"):
+                    alterar_saldo(dados, item.get("conta", ""), item["valor"], "subtrair")
+                    dados["receitas"].pop(idx)
+                    salvar_dados_usuario(usuario_atual, dados)
+                    del st.session_state[confirm_key]
+                    st.rerun()
+                if c_nao.button("Cancelar", key=f"conf_nao_rec_{idx}"):
+                    del st.session_state[confirm_key]
+                    st.rerun()
+            st.markdown("---")
+
+        with st.expander("⚠️ Apagar todo o histórico de receitas deste mês"):
+            st.caption("Atenção: isso remove todos os lançamentos do mês, sem estornar os saldos.")
+            confirma_limpar_rec = st.checkbox("Confirmo que quero apagar tudo", key="chk_limpar_rec")
+            if st.button("Limpar Histórico de Receitas (Mês)", key="limpar_rec", disabled=not confirma_limpar_rec):
+                dados["receitas"] = [r for r in dados.get("receitas", []) if not r["data"].startswith(periodo_ativo)]
+                salvar_dados_usuario(usuario_atual, dados)
+                st.rerun()
 
 # ----------------- ABA 3: MEUS GASTOS FIXOS -----------------
 with abas[2]:
@@ -1151,10 +1208,13 @@ with abas[2]:
                     salvar_dados_usuario(usuario_atual, dados)
                     st.rerun()
                     
-        if st.button("Limpar Todos os Gastos Fixos (Deste Mês)", key="limpar_fixos"):
-            dados["gastos_fixos"] = [g for g in dados.get("gastos_fixos", []) if not g["data"].startswith(periodo_ativo)]
-            salvar_dados_usuario(usuario_atual, dados)
-            st.rerun()
+        with st.expander("⚠️ Apagar todos os gastos fixos deste mês"):
+            st.caption("Atenção: isso remove todos os lançamentos do mês, sem estornar os saldos/faturas.")
+            confirma_limpar_fixos = st.checkbox("Confirmo que quero apagar tudo", key="chk_limpar_fixos")
+            if st.button("Limpar Todos os Gastos Fixos (Deste Mês)", key="limpar_fixos", disabled=not confirma_limpar_fixos):
+                dados["gastos_fixos"] = [g for g in dados.get("gastos_fixos", []) if not g["data"].startswith(periodo_ativo)]
+                salvar_dados_usuario(usuario_atual, dados)
+                st.rerun()
 
 # ----------------- ABA 4: GASTOS AVULSOS -----------------
 with abas[3]:
@@ -1205,27 +1265,50 @@ with abas[3]:
     gastos_avulsos_mes = [g for g in dados.get("gastos_avulsos", []) if g["data"].startswith(periodo_ativo)]
     if gastos_avulsos_mes:
         st.markdown("#### Seus Gastos Avulsos Registrados")
-        df_av = pd.DataFrame(gastos_avulsos_mes)
-        if "metodo_pagamento" not in df_av.columns:
-            df_av["metodo_pagamento"] = "Saldo"
-        
-        # Criar coluna visual unificada
-        locais = []
-        for i, row in df_av.iterrows():
-            if row["metodo_pagamento"] == "Saldo":
-                locais.append(row.get("conta", "Nu"))
-            else:
-                locais.append(row.get("cartao_nome", "Cartão Nu"))
-        df_av["Local"] = locais
-        
-        df_av = df_av[["data", "descricao", "Local", "valor"]]
-        df_av.columns = ["Data", "Descrição", "Forma Utilizada", "Valor (R$)"]
-        st.dataframe(df_av, use_container_width=True)
-        
-        if st.button("Limpar Histórico de Avulsos (Mês)", key="limpar_avulsos"):
-            dados["gastos_avulsos"] = [g for g in dados.get("gastos_avulsos", []) if not g["data"].startswith(periodo_ativo)]
-            salvar_dados_usuario(usuario_atual, dados)
-            st.rerun()
+
+        filtro_av = st.text_input("🔎 Buscar por descrição:", key="filtro_avulsos")
+
+        for idx, item in enumerate(dados["gastos_avulsos"]):
+            if not item["data"].startswith(periodo_ativo):
+                continue
+            if filtro_av and filtro_av.lower() not in item["descricao"].lower():
+                continue
+
+            metodo_item = item.get("metodo_pagamento", "Saldo")
+            local_item = item.get("conta", "Nu") if metodo_item == "Saldo" else item.get("cartao_nome", "Cartão Nu")
+
+            col_d, col_v, col_del = st.columns([3, 2, 1])
+            col_d.markdown(f"**{item['descricao']}**\n\n*{item['data']} — {local_item}*")
+            col_v.markdown(f"R$ {item['valor']:,.2f}")
+
+            confirm_key = f"confirma_del_av_{idx}"
+            if col_del.button("🗑️", key=f"del_av_{idx}", help="Excluir este lançamento"):
+                st.session_state[confirm_key] = True
+
+            if st.session_state.get(confirm_key):
+                st.warning(f"Excluir '{item['descricao']}' (R$ {item['valor']:,.2f})? O valor volta para '{local_item}'.")
+                c_sim, c_nao = st.columns(2)
+                if c_sim.button("Sim, excluir", key=f"conf_sim_av_{idx}"):
+                    if metodo_item == "Saldo":
+                        alterar_saldo(dados, local_item, item["valor"], "somar")
+                    else:
+                        alterar_fatura(dados, local_item, item["valor"], "subtrair")
+                    dados["gastos_avulsos"].pop(idx)
+                    salvar_dados_usuario(usuario_atual, dados)
+                    del st.session_state[confirm_key]
+                    st.rerun()
+                if c_nao.button("Cancelar", key=f"conf_nao_av_{idx}"):
+                    del st.session_state[confirm_key]
+                    st.rerun()
+            st.markdown("---")
+
+        with st.expander("⚠️ Apagar todo o histórico de avulsos deste mês"):
+            st.caption("Atenção: isso remove todos os lançamentos do mês, sem estornar os saldos/faturas.")
+            confirma_limpar_av = st.checkbox("Confirmo que quero apagar tudo", key="chk_limpar_av")
+            if st.button("Limpar Histórico de Avulsos (Mês)", key="limpar_avulsos", disabled=not confirma_limpar_av):
+                dados["gastos_avulsos"] = [g for g in dados.get("gastos_avulsos", []) if not g["data"].startswith(periodo_ativo)]
+                salvar_dados_usuario(usuario_atual, dados)
+                st.rerun()
 
 # ----------------- ABA 5: GASTOS DE TERCEIROS (CONTAS DE DEVEDORES POR PESSOA) -----------------
 with abas[4]:
@@ -1679,7 +1762,8 @@ with abas[5]:
             with col_exc:
                 st.markdown("**Excluir Conta:**")
                 st.warning("⚠️ Ao excluir a conta, seu saldo ativo será perdido.")
-                if st.button("Confirmar Exclusão ❌"):
+                confirma_exc_conta = st.checkbox(f"Confirmo que quero excluir '{conta_selecionada}'", key="chk_exc_conta")
+                if st.button("Confirmar Exclusão ❌", disabled=not confirma_exc_conta):
                     if len(dados["contas"]) <= 1:
                         st.error("Você deve manter pelo menos uma conta ativa!")
                     else:
@@ -1712,7 +1796,8 @@ with abas[5]:
             with col_exc_c:
                 st.markdown("**Excluir Cartão:**")
                 st.warning("⚠️ Ao excluir o cartão, seu saldo de fatura ativa será deletado.")
-                if st.button("Confirmar Exclusão de Cartão ❌"):
+                confirma_exc_cartao = st.checkbox(f"Confirmo que quero excluir '{cartao_selecionado}'", key="chk_exc_cartao")
+                if st.button("Confirmar Exclusão de Cartão ❌", disabled=not confirma_exc_cartao):
                     if len(dados["cartoes"]) <= 1:
                         st.error("Você deve manter pelo menos um cartão ativo!")
                     else:
