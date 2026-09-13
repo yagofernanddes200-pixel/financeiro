@@ -199,7 +199,7 @@ def gerar_relatorio_mensal_pdf(dados, periodo, mes_nome, ano, usuario_atual):
         ("Minhas Receitas (+)", total_receitas),
         ("Gastos Fixos (-)", total_fixos),
         ("Gastos Avulsos (-)", total_avulsos),
-        ("Saldo Livre", saldo_libre),
+        ("Saldo Livre", saldo_livre),
         ("Economias Guardadas", economias_mes),
         ("Fatura de Terceiros a Receber (Mes)", total_cartao_terceiros),
         ("Emprestimos a Receber (Geral)", total_emprestimos_pendentes)
@@ -336,7 +336,7 @@ def gerar_relatorio_mensal_docx(dados, periodo, mes_nome, ano, usuario_atual):
         ("Minhas Receitas (+)", total_receitas),
         ("Gastos Fixos (-)", total_fixos),
         ("Gastos Avulsos (-)", total_avulsos),
-        ("Saldo Livre", saldo_libre),
+        ("Saldo Livre", saldo_livre),
         ("Economias Guardadas", economias_mes),
         ("Fatura de Terceiros a Receber (Mes)", total_cartao_terceiros),
         ("Empréstimos a Receber (Geral)", total_emprestimos_pendentes)
