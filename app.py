@@ -775,6 +775,9 @@ def carregar_dados_usuario(usuario):
     # Log de recebimentos de terceiros (para reconstrução de extrato mensal)
     dados.setdefault("recebimentos_terceiros", [])
 
+    # Log de movimentações de fatura (para reconstrução mensal, igual ao extrato de contas)
+    dados.setdefault("fatura_movimentos", [])
+
     # Migrar pergunta de segurança (recuperação de senha)
     dados.setdefault("pergunta_seguranca", None)
     dados.setdefault("resposta_hash", None)
@@ -814,17 +817,45 @@ def alterar_saldo(dados, nome_conta, valor, operacao="somar"):
             return True
     return False
 
-def alterar_fatura(dados, nome_cartao, valor, operacao="somar"):
+def alterar_fatura(dados, nome_cartao, valor, operacao="somar", data=None):
+    if data is None:
+        data = str(datetime.now().date())
     for cartao in dados.setdefault("cartoes", []):
         if cartao["nome"] == nome_cartao:
+            valor_efetivo = valor if operacao == "somar" else -valor
             if operacao == "somar":
                 cartao["fatura"] += valor
             elif operacao == "subtrair":
-                cartao["fatura"] -= valor
-                if cartao["fatura"] < 0:
-                    cartao["fatura"] = 0.0
+                novo_valor = cartao["fatura"] - valor
+                if novo_valor < 0:
+                    valor_efetivo = -cartao["fatura"]
+                    novo_valor = 0.0
+                cartao["fatura"] = novo_valor
+            dados.setdefault("fatura_movimentos", []).append({
+                "cartao_nome": nome_cartao,
+                "data": data,
+                "valor": valor_efetivo
+            })
             return True
     return False
+
+
+def calcular_fatura_cartao_no_periodo(dados, nome_cartao, periodo_fim):
+    """
+    Reconstrói a fatura de um cartão até o FIM de um período (AAAA-MM), a partir do
+    log de movimentações (mesma lógica usada para o saldo das contas).
+    """
+    cartao_obj = obter_dados_cartao(dados, nome_cartao)
+    if not cartao_obj:
+        return 0.0
+
+    movimentos = [m for m in dados.get("fatura_movimentos", []) if m.get("cartao_nome") == nome_cartao]
+    ajuste_total = sum(m["valor"] for m in movimentos)
+    ajuste_ate_periodo = sum(m["valor"] for m in movimentos if str(m["data"])[:7] <= periodo_fim)
+
+    base = cartao_obj["fatura"] - ajuste_total
+    fatura_reconstruida = base + ajuste_ate_periodo
+    return max(fatura_reconstruida, 0.0)
 
 
 def calcular_saldo_conta_no_periodo(dados, nome_conta, periodo_fim):
@@ -1047,7 +1078,7 @@ with abas[0]:
         calcular_saldo_conta_no_periodo(dados, c["nome"], periodo_ativo)
         for c in dados.get("contas", []) if c.get("tipo", "Normal") == "Guardado"
     )
-    faturas_abertas = sum(c["fatura"] for c in dados.get("cartoes", []))
+    faturas_abertas = sum(calcular_fatura_cartao_no_periodo(dados, c["nome"], periodo_ativo) for c in dados.get("cartoes", []))
     patrimonio_liquido = saldo_normal_contas + saldo_guardado_contas - faturas_abertas
 
     col_pl1, col_pl2 = st.columns(2)
@@ -1055,9 +1086,9 @@ with abas[0]:
     col_pl2.metric(f"🔒 Guardado/Poupança ({mes_selecionado}/{ano_selecionado})", f"R$ {saldo_guardado_contas:,.2f}")
 
     col_pl3, col_pl4 = st.columns(2)
-    col_pl3.metric("Faturas em Aberto (hoje)", f"R$ {faturas_abertas:,.2f}")
+    col_pl3.metric(f"Faturas em Aberto ({mes_selecionado}/{ano_selecionado})", f"R$ {faturas_abertas:,.2f}")
     col_pl4.metric("Patrimônio Líquido", f"R$ {patrimonio_liquido:,.2f}")
-    st.caption("Os saldos de contas refletem o mês/ano selecionado no topo. As faturas mostram o valor real de hoje.")
+    st.caption("Saldos de contas e faturas refletem o mês/ano selecionado no topo — uma fatura de junho não aparece como aberta em maio.")
     st.markdown("---")
 
 
@@ -1376,7 +1407,7 @@ with abas[2]:
                     if metodo_salvar == "Saldo":
                         alterar_saldo(dados, conta_pagamento, val, "subtrair")
                     else:
-                        alterar_fatura(dados, cartao_pagamento, val, "somar")
+                        alterar_fatura(dados, cartao_pagamento, val, "somar", data=f"{periodo_ativo}-01")
 
             elif tipo_despesa_fixa == "Parcelada (número fixo de parcelas)":
                 lista_periodos = get_proximos_meses(data_inicial, total_parc)
@@ -1397,7 +1428,7 @@ with abas[2]:
                         if metodo_salvar == "Saldo":
                             alterar_saldo(dados, conta_pagamento, val, "subtrair")
                         else:
-                            alterar_fatura(dados, cartao_pagamento, val, "somar")
+                            alterar_fatura(dados, cartao_pagamento, val, "somar", data=f"{periodo}-01")
             else:
                 periodo_fat_fixo = periodo_ativo
                 if metodo_salvar == "Cartao":
@@ -1419,7 +1450,7 @@ with abas[2]:
                     if metodo_salvar == "Saldo":
                         alterar_saldo(dados, conta_pagamento, val, "subtrair")
                     else:
-                        alterar_fatura(dados, cartao_pagamento, val, "somar")
+                        alterar_fatura(dados, cartao_pagamento, val, "somar", data=novo_gasto["data"])
                 
             salvar_dados_usuario(usuario_atual, dados)
             st.session_state.fixo_form_key += 1
@@ -1451,12 +1482,12 @@ with abas[2]:
                     if rec_metodo == "Saldo":
                         alterar_saldo(dados, rec_local, valor_mes_rec, "subtrair")
                     else:
-                        alterar_fatura(dados, rec_local, valor_mes_rec, "somar")
+                        alterar_fatura(dados, rec_local, valor_mes_rec, "somar", data=f"{periodo_ativo}-01")
                 else:
                     if rec_metodo == "Saldo":
                         alterar_saldo(dados, rec_local, valor_mes_rec, "somar")
                     else:
-                        alterar_fatura(dados, rec_local, valor_mes_rec, "subtrair")
+                        alterar_fatura(dados, rec_local, valor_mes_rec, "subtrair", data=f"{periodo_ativo}-01")
                 rec["pagamentos"][periodo_ativo] = novo_pago_rec
                 salvar_dados_usuario(usuario_atual, dados)
                 st.rerun()
@@ -1472,7 +1503,7 @@ with abas[2]:
                         if rec_metodo == "Saldo":
                             alterar_saldo(dados, rec_local, diff_rec, "subtrair")
                         else:
-                            alterar_fatura(dados, rec_local, diff_rec, "somar")
+                            alterar_fatura(dados, rec_local, diff_rec, "somar", data=f"{periodo_ativo}-01")
                     rec["valores_override"][periodo_ativo] = novo_valor_rec
                     salvar_dados_usuario(usuario_atual, dados)
                     st.rerun()
@@ -1524,12 +1555,12 @@ with abas[2]:
                         if item_metodo == "Saldo":
                             alterar_saldo(dados, item_local, item["valor"], "subtrair")
                         else:
-                            alterar_fatura(dados, item_local, item["valor"], "somar")
+                            alterar_fatura(dados, item_local, item["valor"], "somar", data=item["data"])
                     else: # Desmarcou pagamento, estorna
                         if item_metodo == "Saldo":
                             alterar_saldo(dados, item_local, item["valor"], "somar")
                         else:
-                            alterar_fatura(dados, item_local, item["valor"], "subtrair")
+                            alterar_fatura(dados, item_local, item["valor"], "subtrair", data=item["data"])
                         
                     dados["gastos_fixos"][idx]["pago"] = status_pago
                     salvar_dados_usuario(usuario_atual, dados)
@@ -1546,7 +1577,7 @@ with abas[2]:
                             if item_metodo == "Saldo":
                                 alterar_saldo(dados, item_local, diff_fixo, "subtrair")
                             else:
-                                alterar_fatura(dados, item_local, diff_fixo, "somar")
+                                alterar_fatura(dados, item_local, diff_fixo, "somar", data=item["data"])
                         dados["gastos_fixos"][idx]["valor"] = novo_valor_fixo
                         salvar_dados_usuario(usuario_atual, dados)
                         st.rerun()
@@ -1558,7 +1589,7 @@ with abas[2]:
                             if item_metodo == "Saldo":
                                 alterar_saldo(dados, item_local, item["valor"], "somar")
                             else:
-                                alterar_fatura(dados, item_local, item["valor"], "subtrair")
+                                alterar_fatura(dados, item_local, item["valor"], "subtrair", data=item["data"])
                         dados["gastos_fixos"].pop(idx)
                         salvar_dados_usuario(usuario_atual, dados)
                         st.rerun()
@@ -1620,7 +1651,7 @@ with abas[3]:
             if metodo_salvar == "Saldo":
                 alterar_saldo(dados, conta_pagamento_av, val, "subtrair")
             else:
-                alterar_fatura(dados, cartao_pagamento_av, val, "somar")
+                alterar_fatura(dados, cartao_pagamento_av, val, "somar", data=novo_avulso["data"])
             
             salvar_dados_usuario(usuario_atual, dados)
             st.session_state.avulso_form_key += 1
@@ -1660,7 +1691,7 @@ with abas[3]:
                     if metodo_item == "Saldo":
                         alterar_saldo(dados, local_item, item["valor"], "somar")
                     else:
-                        alterar_fatura(dados, local_item, item["valor"], "subtrair")
+                        alterar_fatura(dados, local_item, item["valor"], "subtrair", data=item["data"])
                     dados["gastos_avulsos"].pop(idx)
                     salvar_dados_usuario(usuario_atual, dados)
                     del st.session_state[confirm_key]
@@ -1735,7 +1766,7 @@ with abas[4]:
                         }
                         dados.setdefault("terceiros_recorrentes", []).append(novo_terc_rec)
                         if pago_terc:
-                            alterar_fatura(dados, cartao_utilizado, val, "somar")
+                            alterar_fatura(dados, cartao_utilizado, val, "somar", data=f"{periodo_ativo}-01")
 
                     elif tipo_lanc_terc == "Parcelada (número fixo de parcelas)":
                         lista_periodos = get_proximos_meses(data_inicial, total_parc_terc)
@@ -1754,7 +1785,7 @@ with abas[4]:
 
                             # Aumenta a fatura do cartão
                             if i == 0:
-                                alterar_fatura(dados, cartao_utilizado, val, "somar")
+                                alterar_fatura(dados, cartao_utilizado, val, "somar", data=f"{periodo}-01")
                     else:
                         cartao_obj_terc = obter_dados_cartao(dados, cartao_utilizado)
                         periodo_fat_terc = calcular_periodo_fatura(f"{periodo_ativo}-01", cartao_obj_terc.get("fechamento", 1)) if cartao_obj_terc else periodo_ativo
@@ -1768,7 +1799,7 @@ with abas[4]:
                             "periodo_fatura": periodo_fat_terc
                         }
                         dados.setdefault("gastos_terceiros_cartao", []).append(nova_compra)
-                        alterar_fatura(dados, cartao_utilizado, val, "somar")
+                        alterar_fatura(dados, cartao_utilizado, val, "somar", data=nova_compra["data"])
 
                     salvar_dados_usuario(usuario_atual, dados)
                     st.session_state.terc_form_key += 1
@@ -1906,7 +1937,7 @@ with abas[4]:
                                 if col_edit_sim.button("Salvar novo valor", key=f"conf_{edit_key}"):
                                     diff_terc = novo_valor_terc - t["valor"]
                                     if diff_terc != 0:
-                                        alterar_fatura(dados, t.get("cartao_nome", ""), diff_terc, "somar")
+                                        alterar_fatura(dados, t.get("cartao_nome", ""), diff_terc, "somar", data=t["data"])
                                     dados["gastos_terceiros_cartao"][idx_terc]["valor"] = novo_valor_terc
                                     salvar_dados_usuario(usuario_atual, dados)
                                     del st.session_state[edit_key]
@@ -1960,7 +1991,7 @@ with abas[4]:
                                 col_del_sim, col_del_nao = st.columns(2)
                                 if col_del_sim.button("Confirmar exclusão", key=f"conf_{del_key}"):
                                     if motivo_del.startswith("Foi um erro"):
-                                        alterar_fatura(dados, t.get("cartao_nome", ""), t["valor"], "subtrair")
+                                        alterar_fatura(dados, t.get("cartao_nome", ""), t["valor"], "subtrair", data=t["data"])
                                     dados["gastos_terceiros_cartao"].pop(idx_terc)
                                     salvar_dados_usuario(usuario_atual, dados)
                                     del st.session_state[del_key]
@@ -2016,9 +2047,9 @@ with abas[4]:
 
                             if novo_pago_rt != pago_mes_rt:
                                 if novo_pago_rt:
-                                    alterar_fatura(dados, rec_t.get("cartao_nome", ""), valor_mes_rt, "somar")
+                                    alterar_fatura(dados, rec_t.get("cartao_nome", ""), valor_mes_rt, "somar", data=f"{periodo_ativo}-01")
                                 else:
-                                    alterar_fatura(dados, rec_t.get("cartao_nome", ""), valor_mes_rt, "subtrair")
+                                    alterar_fatura(dados, rec_t.get("cartao_nome", ""), valor_mes_rt, "subtrair", data=f"{periodo_ativo}-01")
                                 rec_t["pagamentos"][periodo_ativo] = novo_pago_rt
                                 salvar_dados_usuario(usuario_atual, dados)
                                 st.rerun()
@@ -2303,11 +2334,18 @@ with abas[5]:
             icone_hoje = "🔒" if conta.get("tipo") == "Guardado" else "🏦"
             st.write(f"{icone_hoje} **{conta['nome']}:** R$ {conta['saldo']:,.2f}")
                 
-    st.markdown("#### Faturas Ativas de Cartões de Crédito")
+    st.markdown(f"#### Faturas de Cartões de Crédito em {mes_selecionado}/{ano_selecionado}")
+    st.caption("Cada mês mostra a fatura que existia NAQUELE mês — uma fatura de junho não aparece como aberta em maio.")
     col_cart_s = st.columns(2)
     for c_idx, cartao in enumerate(dados.get("cartoes", [])):
+        fatura_no_mes = calcular_fatura_cartao_no_periodo(dados, cartao["nome"], periodo_ativo)
         with col_cart_s[c_idx % 2]:
-            st.error(f"💳 **{cartao['nome']}:** R$ {cartao['fatura']:,.2f}\n\n*Fecha dia {cartao.get('fechamento', 1)} • Vence dia {cartao.get('vencimento', 10)}*")
+            st.error(f"💳 **{cartao['nome']}:** R$ {fatura_no_mes:,.2f}\n\n*Fecha dia {cartao.get('fechamento', 1)} • Vence dia {cartao.get('vencimento', 10)}*")
+
+    with st.expander("🔎 Ver fatura real de HOJE (para pagar de verdade)"):
+        st.caption("Este é o valor real da fatura agora, independente do mês selecionado acima.")
+        for cartao in dados.get("cartoes", []):
+            st.write(f"💳 **{cartao['nome']}:** R$ {cartao['fatura']:,.2f}")
 
     st.markdown("---")
     st.markdown(f"#### 📒 Extrato de {mes_selecionado}/{ano_selecionado}")
@@ -2322,6 +2360,16 @@ with abas[5]:
         col_ext1.metric(f"{icone_conta} {conta['nome']} — Saldo Anterior", f"R$ {saldo_anterior_periodo:,.2f}")
         col_ext2.metric("Movimentação no Mês", f"R$ {movimentacao:,.2f}")
         col_ext3.metric("Saldo no Fim do Mês", f"R$ {saldo_final_periodo:,.2f}")
+
+    st.markdown("#### 📒 Extrato de Fatura de Cartões")
+    for cartao in dados.get("cartoes", []):
+        fatura_anterior_periodo = calcular_fatura_cartao_no_periodo(dados, cartao["nome"], periodo_anterior_ativo)
+        fatura_final_periodo = calcular_fatura_cartao_no_periodo(dados, cartao["nome"], periodo_ativo)
+        movimentacao_fat = fatura_final_periodo - fatura_anterior_periodo
+        col_extf1, col_extf2, col_extf3 = st.columns(3)
+        col_extf1.metric(f"💳 {cartao['nome']} — Fatura Anterior", f"R$ {fatura_anterior_periodo:,.2f}")
+        col_extf2.metric("Movimentação no Mês", f"R$ {movimentacao_fat:,.2f}")
+        col_extf3.metric("Fatura no Fim do Mês", f"R$ {fatura_final_periodo:,.2f}")
                 
     st.markdown("---")
     
