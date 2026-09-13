@@ -1882,16 +1882,39 @@ with abas[4]:
                                 parcelas_pendentes = [g for g in parcelas_totais if not g["pago"]]
                                 desc_visual = f"{t['descricao']} *(Faltam {len(parcelas_pendentes)} de {total_parc} parcelas)*"
                                 
-                            col_terc_txt, col_terc_btn1, col_terc_btn2 = st.columns([3, 1, 1])
+                            col_terc_txt, col_terc_btn1, col_terc_btn2, col_terc_btn3 = st.columns([3, 1, 1, 1])
                             col_terc_txt.write(f"- **{formatar_data_br(t['data'])}**: {desc_visual} — **R$ {t['valor']:,.2f}** *({t.get('cartao_nome', 'Cartão Nu')})*")
 
                             conv_key = f"conv_{idx_terc}"
                             if col_terc_btn1.button("🔁 Converter", key=f"btn_{conv_key}", help="Já paguei essa parcela com meu dinheiro; a pessoa passa a me dever essa parcela como empréstimo direto."):
                                 st.session_state[conv_key] = True
 
+                            edit_key = f"editterc_{idx_terc}"
+                            if col_terc_btn2.button("✏️", key=f"btn_{edit_key}", help="Editar o valor desta parcela"):
+                                st.session_state[edit_key] = True
+
                             del_key = f"delterc_{idx_terc}"
-                            if col_terc_btn2.button("🗑️", key=f"btn_{del_key}", help="Excluir este lançamento (erro ou dívida perdoada)"):
+                            if col_terc_btn3.button("🗑️", key=f"btn_{del_key}", help="Excluir este lançamento (erro ou dívida perdoada)"):
                                 st.session_state[del_key] = True
+
+                            if st.session_state.get(edit_key):
+                                novo_valor_terc = st.number_input(
+                                    "Novo valor desta parcela:", min_value=0.0, value=float(t["valor"]),
+                                    step=1.0, format="%.2f", key=f"input_{edit_key}"
+                                )
+                                col_edit_sim, col_edit_nao = st.columns(2)
+                                if col_edit_sim.button("Salvar novo valor", key=f"conf_{edit_key}"):
+                                    diff_terc = novo_valor_terc - t["valor"]
+                                    if diff_terc != 0:
+                                        alterar_fatura(dados, t.get("cartao_nome", ""), diff_terc, "somar")
+                                    dados["gastos_terceiros_cartao"][idx_terc]["valor"] = novo_valor_terc
+                                    salvar_dados_usuario(usuario_atual, dados)
+                                    del st.session_state[edit_key]
+                                    st.success("Valor da parcela atualizado!")
+                                    st.rerun()
+                                if col_edit_nao.button("Cancelar", key=f"canc_{edit_key}"):
+                                    del st.session_state[edit_key]
+                                    st.rerun()
 
                             if st.session_state.get(conv_key):
                                 # Converte SOMENTE esta parcela/lançamento (as demais parcelas, se houver, continuam no cartão)
