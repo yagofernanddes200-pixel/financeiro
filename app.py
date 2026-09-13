@@ -1039,16 +1039,27 @@ abas = st.tabs(["📊 Resumo", "💵 Ganhos", "🏠 Fixas", "🛍️ Avulsos", "
 with abas[0]:
     st.markdown(f"<h3 class='titulo-secao'>📊 Painel Financeiro ({mes_selecionado}/{ano_selecionado})</h3>", unsafe_allow_html=True)
     
-    saldo_todas_contas = sum(calcular_saldo_conta_no_periodo(dados, c["nome"], periodo_ativo) for c in dados.get("contas", []))
+    saldo_normal_contas = sum(
+        calcular_saldo_conta_no_periodo(dados, c["nome"], periodo_ativo)
+        for c in dados.get("contas", []) if c.get("tipo", "Normal") == "Normal"
+    )
+    saldo_guardado_contas = sum(
+        calcular_saldo_conta_no_periodo(dados, c["nome"], periodo_ativo)
+        for c in dados.get("contas", []) if c.get("tipo", "Normal") == "Guardado"
+    )
     faturas_abertas = sum(c["fatura"] for c in dados.get("cartoes", []))
-    patrimonio_liquido = saldo_todas_contas - faturas_abertas
+    patrimonio_liquido = saldo_normal_contas + saldo_guardado_contas - faturas_abertas
 
-    col_pl1, col_pl2, col_pl3 = st.columns(3)
-    col_pl1.metric(f"Saldo em Contas ({mes_selecionado}/{ano_selecionado})", f"R$ {saldo_todas_contas:,.2f}")
-    col_pl2.metric("Faturas em Aberto (hoje)", f"R$ {faturas_abertas:,.2f}")
-    col_pl3.metric("Patrimônio Líquido", f"R$ {patrimonio_liquido:,.2f}")
-    st.caption("O saldo em contas reflete o mês/ano selecionado no topo. As faturas mostram o valor real de hoje.")
+    col_pl1, col_pl2 = st.columns(2)
+    col_pl1.metric(f"🏦 Contas Normais ({mes_selecionado}/{ano_selecionado})", f"R$ {saldo_normal_contas:,.2f}")
+    col_pl2.metric(f"🔒 Guardado/Poupança ({mes_selecionado}/{ano_selecionado})", f"R$ {saldo_guardado_contas:,.2f}")
+
+    col_pl3, col_pl4 = st.columns(2)
+    col_pl3.metric("Faturas em Aberto (hoje)", f"R$ {faturas_abertas:,.2f}")
+    col_pl4.metric("Patrimônio Líquido", f"R$ {patrimonio_liquido:,.2f}")
+    st.caption("Os saldos de contas refletem o mês/ano selecionado no topo. As faturas mostram o valor real de hoje.")
     st.markdown("---")
+
 
     tipo_relatorio = st.radio("Escolha o tipo de Relatório:", ["Relatório Mensal", "Relatório Anual"], horizontal=True)
     
@@ -2441,6 +2452,22 @@ with abas[6]:
         st.info(f"💰 **{conta['nome']}:** R$ {saldos_guardado_mes[conta['nome']]:,.2f}")
         
     st.markdown(f"### 📈 Total Acumulado Guardado: **R$ {total_reservas:,.2f}**")
+
+    if contas_guardado:
+        st.markdown("#### 📒 Extrato do Mês por Conta Guardada")
+        periodo_anterior_guardado = periodo_anterior(periodo_ativo)
+        for conta in contas_guardado:
+            saldo_ant_g = calcular_saldo_conta_no_periodo(dados, conta["nome"], periodo_anterior_guardado)
+            saldo_fim_g = calcular_saldo_conta_no_periodo(dados, conta["nome"], periodo_ativo)
+            movimentacao_g = saldo_fim_g - saldo_ant_g
+            col_g1, col_g2, col_g3 = st.columns(3)
+            col_g1.metric(f"🔒 {conta['nome']} — Anterior", f"R$ {saldo_ant_g:,.2f}")
+            col_g2.metric("Movimentação no Mês", f"R$ {movimentacao_g:,.2f}")
+            col_g3.metric("Saldo no Fim do Mês", f"R$ {saldo_fim_g:,.2f}")
+
+        with st.expander("🔎 Ver saldo real de HOJE (independente do mês selecionado)"):
+            for conta in contas_guardado:
+                st.write(f"🔒 **{conta['nome']}:** R$ {conta['saldo']:,.2f}")
 
     # Gráfico de Pizza: composição das reservas guardadas
     if contas_guardado and total_reservas > 0:
