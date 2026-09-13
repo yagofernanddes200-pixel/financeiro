@@ -1039,14 +1039,15 @@ abas = st.tabs(["📊 Resumo", "💵 Ganhos", "🏠 Fixas", "🛍️ Avulsos", "
 with abas[0]:
     st.markdown(f"<h3 class='titulo-secao'>📊 Painel Financeiro ({mes_selecionado}/{ano_selecionado})</h3>", unsafe_allow_html=True)
     
-    saldo_todas_contas = sum(c["saldo"] for c in dados.get("contas", []))
+    saldo_todas_contas = sum(calcular_saldo_conta_no_periodo(dados, c["nome"], periodo_ativo) for c in dados.get("contas", []))
     faturas_abertas = sum(c["fatura"] for c in dados.get("cartoes", []))
     patrimonio_liquido = saldo_todas_contas - faturas_abertas
 
     col_pl1, col_pl2, col_pl3 = st.columns(3)
-    col_pl1.metric("Saldo em Contas", f"R$ {saldo_todas_contas:,.2f}")
-    col_pl2.metric("Faturas em Aberto", f"R$ {faturas_abertas:,.2f}")
+    col_pl1.metric(f"Saldo em Contas ({mes_selecionado}/{ano_selecionado})", f"R$ {saldo_todas_contas:,.2f}")
+    col_pl2.metric("Faturas em Aberto (hoje)", f"R$ {faturas_abertas:,.2f}")
     col_pl3.metric("Patrimônio Líquido", f"R$ {patrimonio_liquido:,.2f}")
+    st.caption("O saldo em contas reflete o mês/ano selecionado no topo. As faturas mostram o valor real de hoje.")
     st.markdown("---")
 
     tipo_relatorio = st.radio("Escolha o tipo de Relatório:", ["Relatório Mensal", "Relatório Anual"], horizontal=True)
@@ -1874,7 +1875,7 @@ with abas[4]:
                             col_terc_txt.write(f"- **{formatar_data_br(t['data'])}**: {desc_visual} — **R$ {t['valor']:,.2f}** *({t.get('cartao_nome', 'Cartão Nu')})*")
 
                             conv_key = f"conv_{idx_terc}"
-                            if col_terc_btn1.button("🔁 Converter", key=f"btn_{conv_key}", help="Já paguei essa parte (ou a compra toda, se for parcelada) com meu dinheiro; a pessoa passa a me dever como empréstimo direto."):
+                            if col_terc_btn1.button("🔁 Converter", key=f"btn_{conv_key}", help="Já paguei essa parcela com meu dinheiro; a pessoa passa a me dever essa parcela como empréstimo direto."):
                                 st.session_state[conv_key] = True
 
                             del_key = f"delterc_{idx_terc}"
@@ -1882,16 +1883,13 @@ with abas[4]:
                                 st.session_state[del_key] = True
 
                             if st.session_state.get(conv_key):
-                                # Se for parcelada, busca TODAS as parcelas pendentes da mesma compra para converter juntas
-                                if base_desc:
-                                    itens_a_converter = [g for g in dados["gastos_terceiros_cartao"] if g["nome"].lower() == nome_dev.lower() and base_desc in g["descricao"] and not g["pago"]]
-                                else:
-                                    itens_a_converter = [t]
+                                # Converte SOMENTE esta parcela/lançamento (as demais parcelas, se houver, continuam no cartão)
+                                itens_a_converter = [t]
                                 valor_total_conv = sum(g["valor"] for g in itens_a_converter)
 
-                                st.info(f"Você está convertendo '{base_desc or t['descricao']}' — {len(itens_a_converter)} parcela(s) pendente(s), total R$ {valor_total_conv:,.2f} — de dívida no cartão para empréstimo direto.")
+                                st.info(f"Você está convertendo '{t['descricao']}' — R$ {valor_total_conv:,.2f} — de dívida no cartão para empréstimo direto.")
                                 conta_saida_conv = st.selectbox(
-                                    "De qual conta sua saiu o dinheiro para pagar essa fatura agora?",
+                                    "De qual conta sua saiu o dinheiro para pagar essa parcela agora?",
                                     [c["nome"] for c in dados["contas"] if c["tipo"] == "Normal"],
                                     key=f"conta_{conv_key}"
                                 )
@@ -1903,7 +1901,7 @@ with abas[4]:
                                     dados.setdefault("gastos_terceiros_emprestimo", []).append({
                                         "data": str(datetime.now().date()),
                                         "nome": nome_dev,
-                                        "descricao": f"Convertido de compra no cartão: {base_desc or t['descricao']}",
+                                        "descricao": f"Convertido de compra no cartão: {t['descricao']}",
                                         "valor": valor_total_conv,
                                         "pago": False,
                                         "conta_origem": conta_saida_conv,
@@ -1912,7 +1910,7 @@ with abas[4]:
                                     })
                                     salvar_dados_usuario(usuario_atual, dados)
                                     del st.session_state[conv_key]
-                                    st.success(f"Convertido! A fatura do cartão foi reduzida em R$ {valor_total_conv:,.2f} e {nome_dev} agora te deve isso como empréstimo direto (as parcelas restantes deixam de aparecer no cartão).")
+                                    st.success(f"Convertido! A fatura do cartão foi reduzida em R$ {valor_total_conv:,.2f} e {nome_dev} agora te deve isso como empréstimo direto.")
                                     st.rerun()
                                 if col_conv_nao.button("Cancelar", key=f"canc_{conv_key}"):
                                     del st.session_state[conv_key]
@@ -2161,22 +2159,31 @@ with abas[4]:
 # ----------------- ABA 6: NOVA ABA SALDOS (CONTAS DINÂMICAS & FATURAS DE CARTÃO) -----------------
 with abas[5]:
     st.markdown("<h3 class='titulo-secao'>💳 Gestão de Contas, Saldos & Cartões</h3>", unsafe_allow_html=True)
-    st.caption("Crie, edite e acompanhe seus saldos bancários e faturas de cartões de crédito em tempo real.")
+    st.caption("Crie, edite e acompanhe seus saldos bancários e faturas de cartões de crédito.")
     
-    # 1. Visualizar Saldos Atuais de Contas e Faturas de Cartão
-    st.markdown("#### Seus Saldos Atuais")
+    # 1. Visualizar Saldos do Mês Selecionado (baseado nas datas dos lançamentos, não no saldo "de hoje")
+    st.markdown(f"#### Seus Saldos em {mes_selecionado}/{ano_selecionado}")
+    st.caption("Cada mês mostra o saldo que a conta tinha NAQUELE mês — um ganho lançado em setembro não aparece em agosto.")
     
     col_c1, col_c2 = st.columns(2)
     with col_c1:
         st.markdown("**Contas Correntes (Dia a Dia):**")
         for conta in dados["contas"]:
             if conta.get("tipo", "Normal") == "Normal":
-                st.info(f"🏦 **{conta['nome']}:** R$ {conta['saldo']:,.2f}")
+                saldo_mes_conta = calcular_saldo_conta_no_periodo(dados, conta["nome"], periodo_ativo)
+                st.info(f"🏦 **{conta['nome']}:** R$ {saldo_mes_conta:,.2f}")
     with col_c2:
         st.markdown("**Poupança & Guardados:**")
         for conta in dados["contas"]:
             if conta.get("tipo", "Normal") == "Guardado":
-                st.success(f"🔒 **{conta['nome']}:** R$ {conta['saldo']:,.2f}")
+                saldo_mes_conta = calcular_saldo_conta_no_periodo(dados, conta["nome"], periodo_ativo)
+                st.success(f"🔒 **{conta['nome']}:** R$ {saldo_mes_conta:,.2f}")
+
+    with st.expander("🔎 Ver saldo real de HOJE (para fazer transferências, pagamentos, etc.)"):
+        st.caption("Este é o valor real disponível agora, independente do mês selecionado acima — use-o para saber quanto você realmente tem disponível hoje.")
+        for conta in dados["contas"]:
+            icone_hoje = "🔒" if conta.get("tipo") == "Guardado" else "🏦"
+            st.write(f"{icone_hoje} **{conta['nome']}:** R$ {conta['saldo']:,.2f}")
                 
     st.markdown("#### Faturas Ativas de Cartões de Crédito")
     col_cart_s = st.columns(2)
@@ -2186,10 +2193,7 @@ with abas[5]:
 
     st.markdown("---")
     st.markdown(f"#### 📒 Extrato de {mes_selecionado}/{ano_selecionado}")
-    st.caption(
-        "Os cartões acima mostram o saldo REAL de hoje. Já este extrato reconstrói, com base nas datas de cada "
-        "lançamento, quanto cada conta tinha no início e no fim do mês que você está vendo — como em um extrato bancário."
-    )
+    st.caption("Saldo anterior (fim do mês passado) → movimentação do mês → saldo no fim do mês selecionado, conta por conta.")
     periodo_anterior_ativo = periodo_anterior(periodo_ativo)
     for conta in dados["contas"]:
         saldo_anterior_periodo = calcular_saldo_conta_no_periodo(dados, conta["nome"], periodo_anterior_ativo)
@@ -2426,20 +2430,22 @@ with abas[6]:
     </div>
     """, unsafe_allow_html=True)
     
-    # Calcular e mostrar saldos de investimentos
+    # Calcular e mostrar saldos de investimentos (referentes ao mês/ano selecionado no topo)
     contas_guardado = [c for c in dados["contas"] if c.get("tipo", "Normal") == "Guardado"]
-    total_reservas = sum(c["saldo"] for c in contas_guardado)
-    
+    saldos_guardado_mes = {c["nome"]: calcular_saldo_conta_no_periodo(dados, c["nome"], periodo_ativo) for c in contas_guardado}
+    total_reservas = sum(saldos_guardado_mes.values())
+
+    st.caption(f"Valores referentes a {mes_selecionado}/{ano_selecionado}.")
     st.markdown("#### Detalhamento das Economias:")
     for conta in contas_guardado:
-        st.info(f"💰 **{conta['nome']}:** R$ {conta['saldo']:,.2f}")
+        st.info(f"💰 **{conta['nome']}:** R$ {saldos_guardado_mes[conta['nome']]:,.2f}")
         
     st.markdown(f"### 📈 Total Acumulado Guardado: **R$ {total_reservas:,.2f}**")
 
     # Gráfico de Pizza: composição das reservas guardadas
     if contas_guardado and total_reservas > 0:
         st.markdown("#### 🥧 Composição das suas Reservas")
-        df_pizza_guardado = pd.DataFrame([{"Conta": c["nome"], "Valor": c["saldo"]} for c in contas_guardado if c["saldo"] > 0])
+        df_pizza_guardado = pd.DataFrame([{"Conta": nome, "Valor": v} for nome, v in saldos_guardado_mes.items() if v > 0])
         fig_guardado = px.pie(df_pizza_guardado, values="Valor", names="Conta", hole=0.4,
                                color_discrete_sequence=px.colors.sequential.Purples_r)
         fig_guardado.update_layout(
