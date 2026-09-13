@@ -4,7 +4,8 @@ import plotly.express as px
 import json
 import os
 import re
-from datetime import datetime
+import hashlib
+from datetime import datetime, timedelta
 
 # Configuração da página para celular (Samsung A15 e iPhone)
 st.set_page_config(
@@ -115,6 +116,76 @@ def get_proximos_meses(data_inicial, parcelas):
     return datas
 
 
+def formatar_data_br(data_iso):
+    """Converte 'AAAA-MM-DD' para 'DD/MM/AAAA'. Retorna o original se não conseguir converter."""
+    try:
+        return datetime.strptime(str(data_iso), "%Y-%m-%d").strftime("%d/%m/%Y")
+    except (ValueError, TypeError):
+        return str(data_iso)
+
+
+def periodo_anterior(periodo):
+    """Recebe 'AAAA-MM' e retorna o período do mês anterior."""
+    ano, mes = map(int, periodo.split("-"))
+    mes -= 1
+    if mes < 1:
+        mes = 12
+        ano -= 1
+    return f"{ano}-{mes:02d}"
+
+
+def periodo_seguinte(periodo):
+    """Recebe 'AAAA-MM' e retorna o período do mês seguinte."""
+    ano, mes = map(int, periodo.split("-"))
+    mes += 1
+    if mes > 12:
+        mes = 1
+        ano += 1
+    return f"{ano}-{mes:02d}"
+
+
+def calcular_periodo_fatura(data_iso, dia_fechamento):
+    """
+    Calcula em qual fatura (AAAA-MM) uma compra no cartão cai, considerando o dia de fechamento.
+    Se a compra ocorreu NO dia do fechamento ou depois, ela entra na fatura do mês seguinte.
+    """
+    try:
+        data_compra = datetime.strptime(str(data_iso), "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return str(data_iso)[:7]
+
+    periodo_atual = f"{data_compra.year}-{data_compra.month:02d}"
+    if data_compra.day >= int(dia_fechamento):
+        return periodo_seguinte(periodo_atual)
+    return periodo_atual
+
+
+def obter_dados_cartao(dados, nome_cartao):
+    return next((c for c in dados.get("cartoes", []) if c["nome"] == nome_cartao), None)
+
+
+def pertence_periodo_cartao(item, periodo):
+    """
+    Verifica se um lançamento pertence a um período (AAAA-MM).
+    Usa o campo 'periodo_fatura' (calculado a partir do fechamento do cartão) quando existir;
+    caso contrário, cai de volta para a data literal do lançamento.
+    """
+    return item.get("periodo_fatura", str(item["data"])[:7]) == periodo
+
+
+def hash_resposta(resposta):
+    return hashlib.sha256(resposta.strip().lower().encode("utf-8")).hexdigest()
+
+
+PERGUNTAS_SEGURANCA_PADRAO = [
+    "Qual o nome do seu primeiro animal de estimação?",
+    "Qual o nome da cidade onde você nasceu?",
+    "Qual o nome dos seus filhos?",
+    "Qual o apelido que você tinha na infância?",
+    "Personalizada (escrever a minha própria pergunta)"
+]
+
+
 # --- FUNÇÕES PARA GERAÇÃO DE RELATÓRIOS (PDF & WORD) ---
 def gerar_relatorio_mensal_pdf(dados, periodo, mes_nome, ano, usuario_atual):
     from fpdf import FPDF
@@ -122,8 +193,8 @@ def gerar_relatorio_mensal_pdf(dados, periodo, mes_nome, ano, usuario_atual):
     
     # Filtrar dados do mês selecionado
     receitas_mes = [r for r in dados.get("receitas", []) if r["data"].startswith(periodo)]
-    gastos_fixos_mes = [g for g in dados.get("gastos_fixos", []) if g["data"].startswith(periodo)]
-    gastos_avulsos_mes = [g for g in dados.get("gastos_avulsos", []) if g["data"].startswith(periodo)]
+    gastos_fixos_mes = [g for g in dados.get("gastos_fixos", []) if pertence_periodo_cartao(g, periodo)]
+    gastos_avulsos_mes = [g for g in dados.get("gastos_avulsos", []) if pertence_periodo_cartao(g, periodo)]
     
     total_receitas = sum(r["valor"] for r in receitas_mes)
     total_fixos = sum(g["valor"] for g in gastos_fixos_mes)
@@ -144,7 +215,7 @@ def gerar_relatorio_mensal_pdf(dados, periodo, mes_nome, ano, usuario_atual):
     unpaid_cartao = [t for t in dados.get("gastos_terceiros_cartao", []) if not t["pago"]]
     unpaid_emprestimo = [e for e in dados.get("gastos_terceiros_emprestimo", []) if not e["pago"]]
     
-    total_cartao_terceiros = sum(t["valor"] for t in unpaid_cartao if t["data"].startswith(periodo))
+    total_cartao_terceiros = sum(t["valor"] for t in unpaid_cartao if pertence_periodo_cartao(t, periodo))
     total_emprestimos_pendentes = sum(e["valor"] for e in unpaid_emprestimo)
     
     pdf = FPDF()
@@ -269,8 +340,8 @@ def gerar_relatorio_mensal_docx(dados, periodo, mes_nome, ano, usuario_atual):
     
     # Filtrar dados do mês selecionado
     receitas_mes = [r for r in dados.get("receitas", []) if r["data"].startswith(periodo)]
-    gastos_fixos_mes = [g for g in dados.get("gastos_fixos", []) if g["data"].startswith(periodo)]
-    gastos_avulsos_mes = [g for g in dados.get("gastos_avulsos", []) if g["data"].startswith(periodo)]
+    gastos_fixos_mes = [g for g in dados.get("gastos_fixos", []) if pertence_periodo_cartao(g, periodo)]
+    gastos_avulsos_mes = [g for g in dados.get("gastos_avulsos", []) if pertence_periodo_cartao(g, periodo)]
     
     total_receitas = sum(r["valor"] for r in receitas_mes)
     total_fixos = sum(g["valor"] for g in gastos_fixos_mes)
@@ -291,7 +362,7 @@ def gerar_relatorio_mensal_docx(dados, periodo, mes_nome, ano, usuario_atual):
     unpaid_cartao = [t for t in dados.get("gastos_terceiros_cartao", []) if not t["pago"]]
     unpaid_emprestimo = [e for e in dados.get("gastos_terceiros_emprestimo", []) if not e["pago"]]
     
-    total_cartao_terceiros = sum(t["valor"] for t in unpaid_cartao if t["data"].startswith(periodo))
+    total_cartao_terceiros = sum(t["valor"] for t in unpaid_cartao if pertence_periodo_cartao(t, periodo))
     total_emprestimos_pendentes = sum(e["valor"] for e in unpaid_emprestimo)
     
     doc = docx.Document()
@@ -678,9 +749,25 @@ def carregar_dados_usuario(usuario):
     # MIGRAR CARTOES DE CRÉDITO DINÂMICOS
     if "cartoes" not in dados:
         dados["cartoes"] = [
-            {"nome": "Cartão Nu", "fatura": 0.0},
-            {"nome": "Cartão PicPay", "fatura": 0.0}
+            {"nome": "Cartão Nu", "fatura": 0.0, "fechamento": 1, "vencimento": 10},
+            {"nome": "Cartão PicPay", "fatura": 0.0, "fechamento": 1, "vencimento": 10}
         ]
+
+    # Garante que cartões antigos (criados antes desta versão) tenham fechamento/vencimento
+    for c in dados.get("cartoes", []):
+        c.setdefault("fechamento", 1)
+        c.setdefault("vencimento", 10)
+
+    # Migrar/garantir lista de gastos fixos recorrentes ("para sempre")
+    dados.setdefault("gastos_recorrentes", [])
+    for rec in dados["gastos_recorrentes"]:
+        rec.setdefault("fim", None)
+        rec.setdefault("pagamentos", {})
+        rec.setdefault("valores_override", {})
+
+    # Migrar pergunta de segurança (recuperação de senha)
+    dados.setdefault("pergunta_seguranca", None)
+    dados.setdefault("resposta_hash", None)
         
     # Compatibilidade com faturas de cartão nas despesas antigas
     for r in dados.get("receitas", []):
@@ -792,10 +879,19 @@ if not st.session_state.autenticado:
             st.markdown("**Criar Novo Perfil Independente**")
             novo_nome = st.text_input("Nome do Novo Usuário:")
             novo_pin = st.text_input("Escolha um PIN de 6 dígitos (somente números):", type="password", max_chars=6)
+
+            pergunta_escolhida = st.selectbox("Escolha uma pergunta de segurança (para recuperar o PIN se esquecer):", PERGUNTAS_SEGURANCA_PADRAO)
+            pergunta_final = pergunta_escolhida
+            if pergunta_escolhida == PERGUNTAS_SEGURANCA_PADRAO[-1]:
+                pergunta_final = st.text_input("Digite sua pergunta personalizada:")
+            resposta_seguranca = st.text_input("Resposta da pergunta de segurança:")
+
             if st.button("Criar Perfil e Acessar 🚀"):
-                if novo_nome and len(novo_pin) == 6 and novo_pin.isdigit():
+                if novo_nome and len(novo_pin) == 6 and novo_pin.isdigit() and pergunta_final and resposta_seguranca:
                     dados_novos = carregar_dados_usuario(novo_nome)
                     dados_novos["pin"] = novo_pin
+                    dados_novos["pergunta_seguranca"] = pergunta_final
+                    dados_novos["resposta_hash"] = hash_resposta(resposta_seguranca)
                     salvar_dados_usuario(novo_nome, dados_novos)
                     st.session_state.usuario_ativo = novo_nome.title()
                     st.session_state.autenticado = True
@@ -803,12 +899,39 @@ if not st.session_state.autenticado:
                     st.success(f"Perfil de {novo_nome} criado e logado!")
                     st.rerun()
                 else:
-                    st.error("Por favor, digite um nome válido e um PIN numérico de exatamente 6 dígitos.")
+                    st.error("Preencha nome, PIN de 6 dígitos, a pergunta e a resposta de segurança.")
         elif novo_usuario != usuario_atual:
             st.session_state.usuario_ativo = novo_usuario
             st.query_params["user"] = novo_usuario.lower()
             st.rerun()
-            
+
+    # --- ESQUECI MEU PIN (RECUPERAÇÃO POR PERGUNTA DE SEGURANÇA) ---
+    st.markdown("---")
+    with st.expander("🔑 Esqueci meu PIN"):
+        if not dados.get("pergunta_seguranca") or not dados.get("resposta_hash"):
+            st.info(
+                "Este perfil ainda não tem uma pergunta de segurança configurada. "
+                "Faça login normalmente e configure uma na aba ⚙️ Senha para poder recuperar o acesso no futuro."
+            )
+        else:
+            st.write(f"**Pergunta de segurança:** {dados['pergunta_seguranca']}")
+            resposta_tentativa = st.text_input("Sua resposta:", key="resposta_recuperacao")
+            novo_pin_rec = st.text_input("Novo PIN (6 dígitos):", type="password", max_chars=6, key="novo_pin_rec")
+            confirmar_pin_rec = st.text_input("Confirme o novo PIN:", type="password", max_chars=6, key="conf_pin_rec")
+            if st.button("Redefinir PIN"):
+                if hash_resposta(resposta_tentativa) != dados["resposta_hash"]:
+                    st.error("Resposta incorreta.")
+                elif not (novo_pin_rec.isdigit() and len(novo_pin_rec) == 6):
+                    st.error("O novo PIN deve ter exatamente 6 números.")
+                elif novo_pin_rec != confirmar_pin_rec:
+                    st.error("Os dois PINs digitados não coincidem.")
+                else:
+                    dados["pin"] = novo_pin_rec
+                    salvar_dados_usuario(usuario_atual, dados)
+                    st.session_state[tentativas_key] = 0
+                    st.success("PIN redefinido com sucesso! Você já pode entrar com o novo PIN.")
+                    st.rerun()
+
     st.stop()
 
 # --- SELETOR DE MÊS E ANO (PLANEJAMENTO SEM LIMITES) ---
@@ -858,8 +981,8 @@ with abas[0]:
     if tipo_relatorio == "Relatório Mensal":
         # Filtrar dados do mês selecionado
         receitas_mes = [r for r in dados.get("receitas", []) if r["data"].startswith(periodo_ativo)]
-        gastos_fixos_mes = [g for g in dados.get("gastos_fixos", []) if g["data"].startswith(periodo_ativo)]
-        gastos_avulsos_mes = [g for g in dados.get("gastos_avulsos", []) if g["data"].startswith(periodo_ativo)]
+        gastos_fixos_mes = [g for g in dados.get("gastos_fixos", []) if pertence_periodo_cartao(g, periodo_ativo)]
+        gastos_avulsos_mes = [g for g in dados.get("gastos_avulsos", []) if pertence_periodo_cartao(g, periodo_ativo)]
         
         total_receitas = sum(r["valor"] for r in receitas_mes)
         total_fixos = sum(g["valor"] for g in gastos_fixos_mes)
@@ -874,7 +997,7 @@ with abas[0]:
         unpaid_cartao = [t for t in dados.get("gastos_terceiros_cartao", []) if not t["pago"]]
         unpaid_emprestimo = [e for e in dados.get("gastos_terceiros_emprestimo", []) if not e["pago"]]
         
-        total_cartao_terceiros = sum(t["valor"] for t in unpaid_cartao if t["data"].startswith(periodo_ativo))
+        total_cartao_terceiros = sum(t["valor"] for t in unpaid_cartao if pertence_periodo_cartao(t, periodo_ativo))
         total_emprestimos_pendentes = sum(e["valor"] for e in unpaid_emprestimo)
         
         # Métricas na tela
@@ -1053,7 +1176,7 @@ with abas[1]:
         conta_dest = st.selectbox("Depositar na Conta:", contas_nomes)
         
         data_padrao = datetime(ano_selecionado, mes_num, min(datetime.now().day, 28))
-        data_rec = st.date_input("Data do Recebimento", data_padrao)
+        data_rec = st.date_input("Data do Recebimento", data_padrao, format="DD/MM/YYYY")
         
         enviar = st.form_submit_button("Salvar Receita")
         if enviar and desc and val > 0:
@@ -1081,7 +1204,7 @@ with abas[1]:
                 continue
 
             col_d, col_v, col_del = st.columns([3, 2, 1])
-            col_d.markdown(f"**{item['descricao']}**\n\n*{item['data']} — {item.get('conta', 'Não especificada')}*")
+            col_d.markdown(f"**{item['descricao']}**\n\n*{formatar_data_br(item['data'])} — {item.get('conta', 'Não especificada')}*")
             col_v.markdown(f"R$ {item['valor']:,.2f}")
 
             confirm_key = f"confirma_del_rec_{idx}"
@@ -1116,8 +1239,8 @@ with abas[2]:
     st.caption("Gastos repetitivos ou parcelados de longo prazo.")
 
     with st.form("form_fixo", clear_on_submit=True):
-        st.markdown("**Adicionar Gasto Fixo / Parcelado**")
-        desc = st.text_input("Descrição do Gasto (Ex: Aluguel, Parcela de Notebook)")
+        st.markdown("**Adicionar Gasto Fixo**")
+        desc = st.text_input("Descrição do Gasto (Ex: Aluguel, Parcela de Notebook, Academia)")
         val = st.number_input("Valor Mensal (R$)", min_value=0.0, step=10.0, format="%.2f")
         
         # INTEGRAÇÃO CARTÃO DE CRÉDITO DINÂMICO
@@ -1128,17 +1251,45 @@ with abas[2]:
         else:
             conta_pagamento = "Não se aplica"
             cartao_pagamento = st.selectbox("Pagar com o Cartão:", [c["nome"] for c in dados["cartoes"]])
-        
-        is_parcelado = st.checkbox("Esta despesa é parcelada?")
-        total_parc = st.number_input("Número total de parcelas:", min_value=1, max_value=48, value=1, step=1)
-        pago = st.checkbox("Marcar primeira parcela como já paga?")
+
+        tipo_despesa_fixa = st.radio(
+            "Tipo de Despesa:",
+            ["Única (só este mês)", "Parcelada (número fixo de parcelas)", "Recorrente (todo mês, até eu encerrar)"]
+        )
+        st.caption("Use 'Recorrente' para gastos como academia, assinaturas ou aluguel: ela continua aparecendo todo mês até você encerrar.")
+
+        total_parc = 1
+        if tipo_despesa_fixa == "Parcelada (número fixo de parcelas)":
+            total_parc = st.number_input("Número total de parcelas:", min_value=2, max_value=48, value=2, step=1)
+
+        pago = st.checkbox("Marcar já como pago neste mês?")
         
         enviar = st.form_submit_button("Salvar Despesa")
         if enviar and desc and val > 0:
             data_inicial = datetime(ano_selecionado, mes_num, 1)
             metodo_salvar = "Saldo" if metodo_p == "Saldo em Conta" else "Cartao"
-            
-            if is_parcelado:
+
+            if tipo_despesa_fixa == "Recorrente (todo mês, até eu encerrar)":
+                novo_recorrente = {
+                    "id": f"rec_{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
+                    "descricao": desc,
+                    "valor": val,
+                    "metodo_pagamento": metodo_salvar,
+                    "conta": conta_pagamento,
+                    "cartao_nome": cartao_pagamento,
+                    "inicio": periodo_ativo,
+                    "fim": None,
+                    "pagamentos": {periodo_ativo: pago},
+                    "valores_override": {}
+                }
+                dados.setdefault("gastos_recorrentes", []).append(novo_recorrente)
+                if pago:
+                    if metodo_salvar == "Saldo":
+                        alterar_saldo(dados, conta_pagamento, val, "subtrair")
+                    else:
+                        alterar_fatura(dados, cartao_pagamento, val, "somar")
+
+            elif tipo_despesa_fixa == "Parcelada (número fixo de parcelas)":
                 lista_periodos = get_proximos_meses(data_inicial, total_parc)
                 for i, periodo in enumerate(lista_periodos):
                     status_pago_parc = pago if i == 0 else False
@@ -1149,7 +1300,8 @@ with abas[2]:
                         "pago": status_pago_parc,
                         "metodo_pagamento": metodo_salvar,
                         "conta": conta_pagamento,
-                        "cartao_nome": cartao_pagamento
+                        "cartao_nome": cartao_pagamento,
+                        "periodo_fatura": periodo
                     }
                     dados.setdefault("gastos_fixos", []).append(novo_gasto)
                     if status_pago_parc:
@@ -1158,6 +1310,11 @@ with abas[2]:
                         else:
                             alterar_fatura(dados, cartao_pagamento, val, "somar")
             else:
+                periodo_fat_fixo = periodo_ativo
+                if metodo_salvar == "Cartao":
+                    cartao_obj_fixo = obter_dados_cartao(dados, cartao_pagamento)
+                    if cartao_obj_fixo:
+                        periodo_fat_fixo = calcular_periodo_fatura(f"{periodo_ativo}-01", cartao_obj_fixo.get("fechamento", 1))
                 novo_gasto = {
                     "data": f"{periodo_ativo}-01",
                     "descricao": desc,
@@ -1165,7 +1322,8 @@ with abas[2]:
                     "pago": pago,
                     "metodo_pagamento": metodo_salvar,
                     "conta": conta_pagamento,
-                    "cartao_nome": cartao_pagamento
+                    "cartao_nome": cartao_pagamento,
+                    "periodo_fatura": periodo_fat_fixo
                 }
                 dados.setdefault("gastos_fixos", []).append(novo_gasto)
                 if pago:
@@ -1178,12 +1336,89 @@ with abas[2]:
             st.success("Despesa cadastrada com sucesso!")
             st.rerun()
 
-    # Mostrar Gastos Fixos do Mês
-    gastos_fixos_mes = [g for g in dados.get("gastos_fixos", []) if g["data"].startswith(periodo_ativo)]
+    # Mostrar Gastos Recorrentes ativos neste mês
+    recorrentes_ativos = [
+        r for r in dados.get("gastos_recorrentes", [])
+        if r["inicio"] <= periodo_ativo and (r["fim"] is None or periodo_ativo < r["fim"])
+    ]
+    if recorrentes_ativos:
+        st.markdown("#### 🔁 Despesas Recorrentes (Todo Mês)")
+        for rec in recorrentes_ativos:
+            valor_mes_rec = rec["valores_override"].get(periodo_ativo, rec["valor"])
+            pago_mes_rec = rec["pagamentos"].get(periodo_ativo, False)
+            rec_metodo = rec.get("metodo_pagamento", "Saldo")
+            rec_local = rec.get("conta", "Nu") if rec_metodo == "Saldo" else rec.get("cartao_nome", "Cartão Nu")
+
+            col_d, col_v, col_p = st.columns([2, 1, 1])
+            col_d.markdown(f"**{rec['descricao']}** 🔁\n\n*({rec_local})*")
+            col_v.markdown(f"R$ {valor_mes_rec:,.2f}")
+            novo_pago_rec = col_p.checkbox("Pago", value=pago_mes_rec, key=f"rec_pago_{rec['id']}_{periodo_ativo}")
+
+            if novo_pago_rec != pago_mes_rec:
+                if novo_pago_rec:
+                    if rec_metodo == "Saldo":
+                        alterar_saldo(dados, rec_local, valor_mes_rec, "subtrair")
+                    else:
+                        alterar_fatura(dados, rec_local, valor_mes_rec, "somar")
+                else:
+                    if rec_metodo == "Saldo":
+                        alterar_saldo(dados, rec_local, valor_mes_rec, "somar")
+                    else:
+                        alterar_fatura(dados, rec_local, valor_mes_rec, "subtrair")
+                rec["pagamentos"][periodo_ativo] = novo_pago_rec
+                salvar_dados_usuario(usuario_atual, dados)
+                st.rerun()
+
+            with st.expander(f"⚙️ Gerenciar '{rec['descricao']}'"):
+                novo_valor_rec = st.number_input(
+                    f"Valor de {mes_selecionado}/{ano_selecionado}:", min_value=0.0,
+                    value=float(valor_mes_rec), step=5.0, format="%.2f", key=f"editval_rec_{rec['id']}"
+                )
+                if st.button("Salvar novo valor deste mês", key=f"btn_editval_rec_{rec['id']}"):
+                    diff_rec = novo_valor_rec - valor_mes_rec
+                    if pago_mes_rec and diff_rec != 0:
+                        if rec_metodo == "Saldo":
+                            alterar_saldo(dados, rec_local, diff_rec, "subtrair")
+                        else:
+                            alterar_fatura(dados, rec_local, diff_rec, "somar")
+                    rec["valores_override"][periodo_ativo] = novo_valor_rec
+                    salvar_dados_usuario(usuario_atual, dados)
+                    st.rerun()
+
+                st.markdown("---")
+                st.caption("Encerrar esta recorrência: ela deixa de aparecer a partir do mês escolhido (meses anteriores continuam no histórico).")
+                if st.button(f"🛑 Encerrar a partir de {mes_selecionado}/{ano_selecionado}", key=f"encerrar_rec_{rec['id']}"):
+                    rec["fim"] = periodo_ativo
+                    salvar_dados_usuario(usuario_atual, dados)
+                    st.success("Recorrência encerrada a partir deste mês.")
+                    st.rerun()
+
+                st.markdown("---")
+                confirma_del_rec = st.checkbox("Confirmo que quero excluir esta recorrência por completo", key=f"chk_del_rec_{rec['id']}")
+                if st.button("🗑️ Excluir recorrência por completo", key=f"del_rec_{rec['id']}", disabled=not confirma_del_rec):
+                    dados["gastos_recorrentes"] = [r for r in dados["gastos_recorrentes"] if r["id"] != rec["id"]]
+                    salvar_dados_usuario(usuario_atual, dados)
+                    st.rerun()
+            st.markdown("---")
+
+    # Mostrar recorrências encerradas que poderiam ser reativadas (apenas informativo, dentro de um expander)
+    recorrentes_encerradas = [r for r in dados.get("gastos_recorrentes", []) if r["fim"] is not None and r["fim"] <= periodo_ativo]
+    if recorrentes_encerradas:
+        with st.expander("↩️ Recorrências encerradas (reativar se necessário)"):
+            for rec in recorrentes_encerradas:
+                col_re1, col_re2 = st.columns([3, 1])
+                col_re1.markdown(f"**{rec['descricao']}** — encerrada a partir de {rec['fim']}")
+                if col_re2.button("Reativar", key=f"reativar_{rec['id']}"):
+                    rec["fim"] = None
+                    salvar_dados_usuario(usuario_atual, dados)
+                    st.rerun()
+
+    # Mostrar Gastos Fixos do Mês (únicos e parcelados)
+    gastos_fixos_mes = [g for g in dados.get("gastos_fixos", []) if pertence_periodo_cartao(g, periodo_ativo)]
     if gastos_fixos_mes:
-        st.markdown("#### Controle de Pagamentos de Despesas Fixas")
+        st.markdown("#### Controle de Pagamentos de Despesas Fixas / Parceladas")
         for idx, item in enumerate(dados["gastos_fixos"]):
-            if item["data"].startswith(periodo_ativo):
+            if pertence_periodo_cartao(item, periodo_ativo):
                 col_d, col_v, col_p = st.columns([2, 1, 1])
                 item_metodo = item.get("metodo_pagamento", "Saldo")
                 item_local = item.get("conta", "Nu") if item_metodo == "Saldo" else item.get("cartao_nome", "Cartão Nu")
@@ -1207,12 +1442,41 @@ with abas[2]:
                     dados["gastos_fixos"][idx]["pago"] = status_pago
                     salvar_dados_usuario(usuario_atual, dados)
                     st.rerun()
+
+                with st.expander(f"⚙️ Editar / Excluir '{item['descricao']}'"):
+                    novo_valor_fixo = st.number_input(
+                        "Valor desta parcela:", min_value=0.0, value=float(item["valor"]),
+                        step=5.0, format="%.2f", key=f"editval_fixo_{idx}"
+                    )
+                    if st.button("Salvar novo valor", key=f"btn_editval_fixo_{idx}"):
+                        diff_fixo = novo_valor_fixo - item["valor"]
+                        if item["pago"] and diff_fixo != 0:
+                            if item_metodo == "Saldo":
+                                alterar_saldo(dados, item_local, diff_fixo, "subtrair")
+                            else:
+                                alterar_fatura(dados, item_local, diff_fixo, "somar")
+                        dados["gastos_fixos"][idx]["valor"] = novo_valor_fixo
+                        salvar_dados_usuario(usuario_atual, dados)
+                        st.rerun()
+
+                    st.markdown("---")
+                    confirma_del_fixo = st.checkbox("Confirmo que quero excluir este item", key=f"chk_del_fixo_{idx}")
+                    if st.button("🗑️ Excluir este item", key=f"del_fixo_{idx}", disabled=not confirma_del_fixo):
+                        if item["pago"]:
+                            if item_metodo == "Saldo":
+                                alterar_saldo(dados, item_local, item["valor"], "somar")
+                            else:
+                                alterar_fatura(dados, item_local, item["valor"], "subtrair")
+                        dados["gastos_fixos"].pop(idx)
+                        salvar_dados_usuario(usuario_atual, dados)
+                        st.rerun()
+                st.markdown("---")
                     
         with st.expander("⚠️ Apagar todos os gastos fixos deste mês"):
             st.caption("Atenção: isso remove todos os lançamentos do mês, sem estornar os saldos/faturas.")
             confirma_limpar_fixos = st.checkbox("Confirmo que quero apagar tudo", key="chk_limpar_fixos")
             if st.button("Limpar Todos os Gastos Fixos (Deste Mês)", key="limpar_fixos", disabled=not confirma_limpar_fixos):
-                dados["gastos_fixos"] = [g for g in dados.get("gastos_fixos", []) if not g["data"].startswith(periodo_ativo)]
+                dados["gastos_fixos"] = [g for g in dados.get("gastos_fixos", []) if not pertence_periodo_cartao(g, periodo_ativo)]
                 salvar_dados_usuario(usuario_atual, dados)
                 st.rerun()
 
@@ -1236,18 +1500,24 @@ with abas[3]:
             cartao_pagamento_av = st.selectbox("Pagar com o Cartão:", [c["nome"] for c in dados["cartoes"]])
         
         data_padrao = datetime(ano_selecionado, mes_num, min(datetime.now().day, 28))
-        data_gasto = st.date_input("Data do Gasto", data_padrao)
+        data_gasto = st.date_input("Data do Gasto", data_padrao, format="DD/MM/YYYY")
         
         enviar = st.form_submit_button("Salvar Gasto Avulso")
         if enviar and desc and val > 0:
             metodo_salvar = "Saldo" if metodo_p_av == "Saldo em Conta" else "Cartao"
+            periodo_fat_av = periodo_ativo
+            if metodo_salvar == "Cartao":
+                cartao_obj_av = obter_dados_cartao(dados, cartao_pagamento_av)
+                if cartao_obj_av:
+                    periodo_fat_av = calcular_periodo_fatura(str(data_gasto), cartao_obj_av.get("fechamento", 1))
             novo_avulso = {
                 "data": str(data_gasto),
                 "descricao": desc,
                 "valor": val,
                 "metodo_pagamento": metodo_salvar,
                 "conta": conta_pagamento_av,
-                "cartao_nome": cartao_pagamento_av
+                "cartao_nome": cartao_pagamento_av,
+                "periodo_fatura": periodo_fat_av
             }
             dados.setdefault("gastos_avulsos", []).append(novo_avulso)
             
@@ -1262,14 +1532,14 @@ with abas[3]:
             st.rerun()
 
     # Mostrar Gastos Avulsos
-    gastos_avulsos_mes = [g for g in dados.get("gastos_avulsos", []) if g["data"].startswith(periodo_ativo)]
+    gastos_avulsos_mes = [g for g in dados.get("gastos_avulsos", []) if pertence_periodo_cartao(g, periodo_ativo)]
     if gastos_avulsos_mes:
         st.markdown("#### Seus Gastos Avulsos Registrados")
 
         filtro_av = st.text_input("🔎 Buscar por descrição:", key="filtro_avulsos")
 
         for idx, item in enumerate(dados["gastos_avulsos"]):
-            if not item["data"].startswith(periodo_ativo):
+            if not pertence_periodo_cartao(item, periodo_ativo):
                 continue
             if filtro_av and filtro_av.lower() not in item["descricao"].lower():
                 continue
@@ -1278,7 +1548,7 @@ with abas[3]:
             local_item = item.get("conta", "Nu") if metodo_item == "Saldo" else item.get("cartao_nome", "Cartão Nu")
 
             col_d, col_v, col_del = st.columns([3, 2, 1])
-            col_d.markdown(f"**{item['descricao']}**\n\n*{item['data']} — {local_item}*")
+            col_d.markdown(f"**{item['descricao']}**\n\n*{formatar_data_br(item['data'])} — {local_item}*")
             col_v.markdown(f"R$ {item['valor']:,.2f}")
 
             confirm_key = f"confirma_del_av_{idx}"
@@ -1306,7 +1576,7 @@ with abas[3]:
             st.caption("Atenção: isso remove todos os lançamentos do mês, sem estornar os saldos/faturas.")
             confirma_limpar_av = st.checkbox("Confirmo que quero apagar tudo", key="chk_limpar_av")
             if st.button("Limpar Histórico de Avulsos (Mês)", key="limpar_avulsos", disabled=not confirma_limpar_av):
-                dados["gastos_avulsos"] = [g for g in dados.get("gastos_avulsos", []) if not g["data"].startswith(periodo_ativo)]
+                dados["gastos_avulsos"] = [g for g in dados.get("gastos_avulsos", []) if not pertence_periodo_cartao(g, periodo_ativo)]
                 salvar_dados_usuario(usuario_atual, dados)
                 st.rerun()
 
@@ -1351,7 +1621,8 @@ with abas[4]:
                                 "descricao": f"{desc} (Parc. {i+1}/{total_parc_terc})",
                                 "valor": val,
                                 "pago": status_pago_parc,
-                                "cartao_nome": cartao_utilizado
+                                "cartao_nome": cartao_utilizado,
+                                "periodo_fatura": periodo
                             }
                             dados.setdefault("gastos_terceiros_cartao", []).append(nova_compra)
                             
@@ -1359,13 +1630,16 @@ with abas[4]:
                             if i == 0:
                                 alterar_fatura(dados, cartao_utilizado, val, "somar")
                     else:
+                        cartao_obj_terc = obter_dados_cartao(dados, cartao_utilizado)
+                        periodo_fat_terc = calcular_periodo_fatura(f"{periodo_ativo}-01", cartao_obj_terc.get("fechamento", 1)) if cartao_obj_terc else periodo_ativo
                         nova_compra = {
                             "data": f"{periodo_ativo}-01",
                             "nome": nome_formatado,
                             "descricao": desc,
                             "valor": val,
                             "pago": pago_terc,
-                            "cartao_nome": cartao_utilizado
+                            "cartao_nome": cartao_utilizado,
+                            "periodo_fatura": periodo_fat_terc
                         }
                         dados.setdefault("gastos_terceiros_cartao", []).append(nova_compra)
                         alterar_fatura(dados, cartao_utilizado, val, "somar")
@@ -1430,22 +1704,29 @@ with abas[4]:
                 # Filtrar itens específicos desse devedor
                 debitos_cartao = [t for t in unpaid_cartao if t["nome"].lower() == nome_dev.lower()]
                 debitos_emp = [e for e in unpaid_emprestimo if e["nome"].lower() == nome_dev.lower()]
-                
-                total_dev_cartao = sum(t["valor"] for t in debitos_cartao)
+
+                # Valor referente a ESTE mês (parcela do mês corrente) vs. total ainda pendente em todos os meses futuros
+                debitos_cartao_mes = [t for t in debitos_cartao if pertence_periodo_cartao(t, periodo_ativo)]
+                total_dev_cartao_mes = sum(t["valor"] for t in debitos_cartao_mes)
+                total_dev_cartao_geral = sum(t["valor"] for t in debitos_cartao)
                 total_dev_emp = sum(e["valor"] for e in debitos_emp)
-                total_dev_geral = total_dev_cartao + total_dev_emp
+                total_dev_geral = total_dev_cartao_geral + total_dev_emp
                 
                 # Expandível customizado por devedor com balanço
-                with st.expander(f"👤 {nome_dev} — Saldo Devedor Total: R$ {total_dev_geral:,.2f}"):
+                with st.expander(f"👤 {nome_dev} — Deve no total: R$ {total_dev_geral:,.2f}"):
                     st.markdown(f"**Balanço do Devedor:**")
-                    st.markdown(f"- 💳 Débitos em Cartão de Crédito: **R$ {total_dev_cartao:,.2f}**")
+                    st.markdown(f"- 💳 Valor do Cartão referente a {mes_selecionado}/{ano_selecionado}: **R$ {total_dev_cartao_mes:,.2f}**")
+                    if total_dev_cartao_geral > total_dev_cartao_mes:
+                        st.caption(f"Total ainda pendente no cartão, somando parcelas de outros meses: R$ {total_dev_cartao_geral:,.2f}")
                     st.markdown(f"- 💸 Débitos de Empréstimos (Pix/Dinheiro): **R$ {total_dev_emp:,.2f}**")
                     st.markdown("---")
                     
                     # Mostrar Detalhamento do Cartão
                     if debitos_cartao:
                         st.markdown("**💳 Detalhamento de Compras no Cartão:**")
-                        for t in debitos_cartao:
+                        for idx_terc, t in enumerate(dados["gastos_terceiros_cartao"]):
+                            if t not in debitos_cartao:
+                                continue
                             desc_visual = t["descricao"]
                             
                             # Parser de Parcelas Restantes
@@ -1459,13 +1740,48 @@ with abas[4]:
                                 parcelas_pendentes = [g for g in parcelas_totais if not g["pago"]]
                                 desc_visual = f"{t['descricao']} *(Faltam {len(parcelas_pendentes)} de {total_parc} parcelas)*"
                                 
-                            st.write(f"- **{t['data']}**: {desc_visual} — **R$ {t['valor']:,.2f}** *({t.get('cartao_nome', 'Cartão Nu')})*")
+                            col_terc_txt, col_terc_btn = st.columns([4, 1])
+                            col_terc_txt.write(f"- **{formatar_data_br(t['data'])}**: {desc_visual} — **R$ {t['valor']:,.2f}** *({t.get('cartao_nome', 'Cartão Nu')})*")
+
+                            conv_key = f"conv_{idx_terc}"
+                            if col_terc_btn.button("🔁 Converter", key=f"btn_{conv_key}", help="Já paguei essa parte da fatura com meu dinheiro; a pessoa passa a me dever como empréstimo direto."):
+                                st.session_state[conv_key] = True
+
+                            if st.session_state.get(conv_key):
+                                st.info(f"Você está convertendo '{t['descricao']}' (R$ {t['valor']:,.2f}) de dívida no cartão para empréstimo direto.")
+                                conta_saida_conv = st.selectbox(
+                                    "De qual conta sua saiu o dinheiro para pagar essa parte da fatura agora?",
+                                    [c["nome"] for c in dados["contas"] if c["tipo"] == "Normal"],
+                                    key=f"conta_{conv_key}"
+                                )
+                                col_conv_sim, col_conv_nao = st.columns(2)
+                                if col_conv_sim.button("Confirmar conversão", key=f"conf_{conv_key}"):
+                                    alterar_fatura(dados, t.get("cartao_nome", ""), t["valor"], "subtrair")
+                                    alterar_saldo(dados, conta_saida_conv, t["valor"], "subtrair")
+                                    dados["gastos_terceiros_cartao"].pop(idx_terc)
+                                    dados.setdefault("gastos_terceiros_emprestimo", []).append({
+                                        "data": str(datetime.now().date()),
+                                        "nome": nome_dev,
+                                        "descricao": f"Convertido de compra no cartão: {t['descricao']}",
+                                        "valor": t["valor"],
+                                        "pago": False,
+                                        "conta_origem": conta_saida_conv,
+                                        "forma_recebimento": "",
+                                        "conta_destino": ""
+                                    })
+                                    salvar_dados_usuario(usuario_atual, dados)
+                                    del st.session_state[conv_key]
+                                    st.success(f"Convertido! A fatura do cartão foi reduzida em R$ {t['valor']:,.2f} e {nome_dev} agora te deve isso como empréstimo direto.")
+                                    st.rerun()
+                                if col_conv_nao.button("Cancelar", key=f"canc_{conv_key}"):
+                                    del st.session_state[conv_key]
+                                    st.rerun()
                             
                     # Mostrar Detalhamento do Empréstimo
                     if debitos_emp:
                         st.markdown("**💸 Detalhamento de Empréstimos (Dinheiro/Pix):**")
                         for e in debitos_emp:
-                            st.write(f"- **{e['data']}**: {e['descricao']} — **R$ {e['valor']:,.2f}** *(Retirado de: {e.get('conta_origem', 'Dinheiro')})*")
+                            st.write(f"- **{formatar_data_br(e['data'])}**: {e['descricao']} — **R$ {e['valor']:,.2f}** *(Retirado de: {e.get('conta_origem', 'Dinheiro')})*")
                             
                     st.markdown("---")
                     st.markdown(f"**📥 Registrar Recebimento / Quitação de {nome_dev}**")
@@ -1580,11 +1896,11 @@ with abas[4]:
             if pessoa_cartao_paga:
                 st.markdown("**💳 Compras no Cartão (Pagas/Reembolsadas):**")
                 for t in pessoa_cartao_paga:
-                    st.write(f"- **{t['data']}**: {t['nome']} pagou: **R$ {t['valor']:,.2f}** - *({t['descricao']})*")
+                    st.write(f"- **{formatar_data_br(t['data'])}**: {t['nome']} pagou: **R$ {t['valor']:,.2f}** - *({t['descricao']})*")
             if pessoa_emprestimo_pago:
                 st.markdown("**💸 Empréstimos (Quitados/Recebidos):**")
                 for e in pessoa_emprestimo_pago:
-                    st.write(f"- **{e['data']}**: {e['nome']} quitou: **R$ {e['valor']:,.2f}** - *({e['descricao']})* -> Destino: {e.get('conta_destino', 'Nu')} ({e.get('forma_recebimento', 'PIX')})")
+                    st.write(f"- **{formatar_data_br(e['data'])}**: {e['nome']} quitou: **R$ {e['valor']:,.2f}** - *({e['descricao']})* -> Destino: {e.get('conta_destino', 'Nu')} ({e.get('forma_recebimento', 'PIX')})")
 
 # ----------------- ABA 6: NOVA ABA SALDOS (CONTAS DINÂMICAS & FATURAS DE CARTÃO) -----------------
 with abas[5]:
@@ -1610,7 +1926,7 @@ with abas[5]:
     col_cart_s = st.columns(2)
     for c_idx, cartao in enumerate(dados.get("cartoes", [])):
         with col_cart_s[c_idx % 2]:
-            st.error(f"💳 **{cartao['nome']}:** R$ {cartao['fatura']:,.2f}")
+            st.error(f"💳 **{cartao['nome']}:** R$ {cartao['fatura']:,.2f}\n\n*Fecha dia {cartao.get('fechamento', 1)} • Vence dia {cartao.get('vencimento', 10)}*")
                 
     st.markdown("---")
     
@@ -1712,6 +2028,10 @@ with abas[5]:
             with st.form("form_criar_cartao_din", clear_on_submit=True):
                 nome_novo_cartao = st.text_input("Nome do Cartão (Ex: Cartão Inter, Cartão Elo):")
                 fatura_inicial = st.number_input("Fatura Inicial Pendente (R$):", min_value=0.0, step=10.0, format="%.2f")
+                col_fech, col_venc = st.columns(2)
+                dia_fechamento_novo = col_fech.number_input("Dia do Fechamento:", min_value=1, max_value=28, value=1, step=1)
+                dia_vencimento_novo = col_venc.number_input("Dia do Vencimento:", min_value=1, max_value=28, value=10, step=1)
+                st.caption("Compras feitas no dia do fechamento (ou depois) entram automaticamente na fatura do mês seguinte.")
                 criar_c = st.form_submit_button("Criar Cartão 💳")
                 if criar_c and nome_novo_cartao:
                     ja_existe = any(c["nome"].lower() == nome_novo_cartao.lower() for c in dados["cartoes"])
@@ -1720,7 +2040,9 @@ with abas[5]:
                     else:
                         dados["cartoes"].append({
                             "nome": nome_novo_cartao.strip(),
-                            "fatura": fatura_inicial
+                            "fatura": fatura_inicial,
+                            "fechamento": int(dia_fechamento_novo),
+                            "vencimento": int(dia_vencimento_novo)
                         })
                         salvar_dados_usuario(usuario_atual, dados)
                         st.success(f"Cartão '{nome_novo_cartao}' criado com sucesso!")
@@ -1774,6 +2096,20 @@ with abas[5]:
                         
         else: # Cartões de Crédito
             cartao_selecionado = st.selectbox("Selecione o Cartão para gerenciar:", [c["nome"] for c in dados["cartoes"]])
+            cartao_obj_sel = obter_dados_cartao(dados, cartao_selecionado)
+
+            st.markdown("**Datas de Fechamento e Vencimento:**")
+            col_fech_e, col_venc_e = st.columns(2)
+            novo_fech = col_fech_e.number_input("Dia do Fechamento:", min_value=1, max_value=28, value=cartao_obj_sel.get("fechamento", 1), step=1, key="edit_fech")
+            novo_venc = col_venc_e.number_input("Dia do Vencimento:", min_value=1, max_value=28, value=cartao_obj_sel.get("vencimento", 10), step=1, key="edit_venc")
+            if st.button("Salvar Datas de Fatura"):
+                cartao_obj_sel["fechamento"] = int(novo_fech)
+                cartao_obj_sel["vencimento"] = int(novo_venc)
+                salvar_dados_usuario(usuario_atual, dados)
+                st.success("Datas de fechamento/vencimento atualizadas!")
+                st.rerun()
+            st.markdown("---")
+
             col_ren_c, col_exc_c = st.columns(2)
             
             with col_ren_c:
@@ -1826,6 +2162,21 @@ with abas[6]:
         st.info(f"💰 **{conta['nome']}:** R$ {conta['saldo']:,.2f}")
         
     st.markdown(f"### 📈 Total Acumulado Guardado: **R$ {total_reservas:,.2f}**")
+
+    # Gráfico de Pizza: composição das reservas guardadas
+    if contas_guardado and total_reservas > 0:
+        st.markdown("#### 🥧 Composição das suas Reservas")
+        df_pizza_guardado = pd.DataFrame([{"Conta": c["nome"], "Valor": c["saldo"]} for c in contas_guardado if c["saldo"] > 0])
+        fig_guardado = px.pie(df_pizza_guardado, values="Valor", names="Conta", hole=0.4,
+                               color_discrete_sequence=px.colors.sequential.Purples_r)
+        fig_guardado.update_layout(
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font_color="#FFFFFF",
+            margin=dict(t=10, b=10, l=10, r=10),
+            height=260
+        )
+        st.plotly_chart(fig_guardado, use_container_width=True)
     
     # Histórico de transferências para poupança (economias)
     transferencias_poupanca = []
@@ -1839,6 +2190,7 @@ with abas[6]:
         st.markdown("#### Histórico Recente de Economias Guardadas")
         df_dep = pd.DataFrame(transferencias_poupanca)
         df_dep = df_dep[["data", "origem", "destino", "valor"]]
+        df_dep["data"] = df_dep["data"].apply(formatar_data_br)
         df_dep.columns = ["Data", "Origem", "Destino (Guardado)", "Valor Guardado (R$)"]
         st.dataframe(df_dep, use_container_width=True)
 
@@ -1865,3 +2217,27 @@ with abas[7]:
                 salvar_dados_usuario(usuario_atual, dados)
                 st.success("Sua senha (PIN) de 6 dígitos foi alterada com sucesso!")
                 st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 🔑 Pergunta de Segurança (Recuperação de PIN)")
+    if dados.get("pergunta_seguranca"):
+        st.caption(f"Pergunta atual: **{dados['pergunta_seguranca']}**")
+    else:
+        st.caption("Você ainda não configurou uma pergunta de segurança. Configure uma para poder recuperar seu PIN caso esqueça.")
+
+    with st.form("form_pergunta_seguranca"):
+        pergunta_escolhida_cfg = st.selectbox("Pergunta de Segurança:", PERGUNTAS_SEGURANCA_PADRAO, key="pergunta_cfg")
+        pergunta_final_cfg = pergunta_escolhida_cfg
+        if pergunta_escolhida_cfg == PERGUNTAS_SEGURANCA_PADRAO[-1]:
+            pergunta_final_cfg = st.text_input("Digite sua pergunta personalizada:", key="pergunta_custom_cfg")
+        resposta_cfg = st.text_input("Resposta:", key="resposta_cfg")
+        salvar_pergunta_btn = st.form_submit_button("Salvar Pergunta de Segurança")
+        if salvar_pergunta_btn:
+            if pergunta_final_cfg and resposta_cfg:
+                dados["pergunta_seguranca"] = pergunta_final_cfg
+                dados["resposta_hash"] = hash_resposta(resposta_cfg)
+                salvar_dados_usuario(usuario_atual, dados)
+                st.success("Pergunta de segurança salva com sucesso!")
+                st.rerun()
+            else:
+                st.error("Preencha a pergunta e a resposta.")
