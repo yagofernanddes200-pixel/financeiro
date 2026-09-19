@@ -8,12 +8,51 @@ arquivo principal e deixar mais fácil localizar e testar essas regras isoladame
 
 Nada aqui chama `st.*` — são todas funções puras que recebem e devolvem dados comuns
 (dict, str, float etc.), então podem ser importadas e testadas sem rodar o Streamlit.
+
+PERSISTÊNCIA: por padrão, os dados são salvos em arquivos .json locais (bom para testes,
+mas o Streamlit Cloud apaga esses arquivos sempre que o servidor reinicia/dorme). Para
+persistência de verdade — que sobrevive a qualquer reinicialização do servidor — chame
+`configurar_firestore(credenciais)` uma vez, bem no início do app, passando as credenciais
+de uma conta de serviço do Firebase. A partir daí, todo carregamento/salvamento passa a
+usar o Firestore (banco de dados na nuvem do Google) automaticamente, com cada perfil de
+usuário (Yago, Binete, etc.) guardado como um documento separado.
 """
 
 import json
 import os
 import hashlib
 from datetime import datetime
+
+# Cliente do Firestore, configurado (opcionalmente) via configurar_firestore().
+# Enquanto for None, o app usa arquivos .json locais como já fazia antes.
+_db_firestore = None
+_COLECAO_FIRESTORE = "usuarios_financas"
+
+
+def configurar_firestore(credenciais_dict):
+    """
+    Liga a persistência em nuvem (Firestore). Chame isso uma única vez, bem no início do
+    app (antes de qualquer carregar_dados_usuario/salvar_dados_usuario), passando um dict
+    com as credenciais da conta de serviço do Firebase (o conteúdo do arquivo .json que o
+    Firebase gera, já carregado com json.loads).
+
+    Se isso nunca for chamado (ou se a configuração falhar), o app continua funcionando
+    normalmente com arquivos .json locais — só que, nesse caso, os dados não sobrevivem a
+    uma reinicialização do servidor no Streamlit Cloud.
+    """
+    global _db_firestore
+    import firebase_admin
+    from firebase_admin import credentials, firestore
+
+    if not firebase_admin._apps:
+        cred = credentials.Certificate(dict(credenciais_dict))
+        firebase_admin.initialize_app(cred)
+    _db_firestore = firestore.client()
+
+
+def firestore_ativo():
+    """Diz se a persistência em nuvem está ligada (True) ou se está usando arquivo local (False)."""
+    return _db_firestore is not None
 
 
 # --- FUNÇÕES DE AUXÍLIO PARA DATAS ---
@@ -138,15 +177,22 @@ def obter_caminho_dados(usuario):
     return f"dados_financeiros_{nome_limpo}.json"
 
 def carregar_dados_usuario(usuario):
-    caminho = obter_caminho_dados(usuario)
-    if os.path.exists(caminho):
-        try:
-            with open(caminho, "r", encoding="utf-8") as f:
-                dados = json.load(f)
-        except:
+    if _db_firestore is not None:
+        doc_id = usuario.lower().strip().replace(" ", "_")
+        doc = _db_firestore.collection(_COLECAO_FIRESTORE).document(doc_id).get()
+        dados = doc.to_dict() if doc.exists else {}
+        if dados is None:
             dados = {}
     else:
-        dados = {}
+        caminho = obter_caminho_dados(usuario)
+        if os.path.exists(caminho):
+            try:
+                with open(caminho, "r", encoding="utf-8") as f:
+                    dados = json.load(f)
+            except:
+                dados = {}
+        else:
+            dados = {}
         
     # Inicialização padrão de chaves para segurança
     pin_padrao = "123456" if usuario.lower() == "yago" else "654321" if usuario.lower() == "binete" else "123456"
@@ -238,9 +284,13 @@ def carregar_dados_usuario(usuario):
     return dados
 
 def salvar_dados_usuario(usuario, dados):
-    caminho = obter_caminho_dados(usuario)
-    with open(caminho, "w", encoding="utf-8") as f:
-        json.dump(dados, f, indent=4, ensure_ascii=False)
+    if _db_firestore is not None:
+        doc_id = usuario.lower().strip().replace(" ", "_")
+        _db_firestore.collection(_COLECAO_FIRESTORE).document(doc_id).set(dados)
+    else:
+        caminho = obter_caminho_dados(usuario)
+        with open(caminho, "w", encoding="utf-8") as f:
+            json.dump(dados, f, indent=4, ensure_ascii=False)
 
 # --- AUXILIARES DE MOVIMENTAÇÃO DE SALDO & FATURAS ---
 def alterar_saldo(dados, nome_conta, valor, operacao="somar"):
