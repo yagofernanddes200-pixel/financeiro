@@ -634,7 +634,7 @@ with abas[2]:
     if tipo_despesa_fixa == "Única (só este mês)":
         data_padrao_unico = datetime(ano_selecionado, mes_num, min(datetime.now().day, 28))
         data_gasto_unico = st.date_input(
-            "Data do Gasto", data_padrao_unico, format="DD/MM/YYYY", key=f"data_unico_{fk}"
+            "Data do Gasto", data_padrao_unico, format="DD/MM/YYYY", key=f"data_unico_{fk}_{periodo_ativo}"
         )
         st.caption("No cartão, a data escolhida decide em qual fatura o gasto cai (antes ou depois do fechamento).")
 
@@ -660,6 +660,15 @@ with abas[2]:
             metodo_salvar = "Saldo" if metodo_p == "Saldo em Conta" else "Cartao"
 
             if tipo_despesa_fixa == "Recorrente (todo mês, até eu encerrar)":
+                periodo_inicio_rec = periodo_ativo
+                if metodo_salvar == "Cartao":
+                    cartao_obj_rec = obter_dados_cartao(dados, cartao_pagamento)
+                    if cartao_obj_rec:
+                        # Usa o dia de hoje (dentro do mês selecionado) pra saber se, dado o
+                        # fechamento do cartão, essa recorrência já entra na fatura deste mês
+                        # ou só a partir do mês seguinte — igual já fazemos pra Única/Parcelada.
+                        data_referencia_rec = f"{periodo_ativo}-{min(datetime.now().day, 28):02d}"
+                        periodo_inicio_rec = calcular_periodo_fatura(data_referencia_rec, cartao_obj_rec.get("fechamento", 1))
                 novo_recorrente = {
                     "id": f"rec_{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
                     "descricao": desc,
@@ -667,9 +676,9 @@ with abas[2]:
                     "metodo_pagamento": metodo_salvar,
                     "conta": conta_pagamento,
                     "cartao_nome": cartao_pagamento,
-                    "inicio": periodo_ativo,
+                    "inicio": periodo_inicio_rec,
                     "fim": None,
-                    "pagamentos": {periodo_ativo: pago},
+                    "pagamentos": {periodo_inicio_rec: pago},
                     "valores_override": {},
                     "periodos_lancados": []
                 }
