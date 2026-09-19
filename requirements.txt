@@ -2,3 +2,4 @@ pandas
 plotly
 fpdf2
 python-docx
+firebase-admin
