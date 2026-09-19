@@ -119,6 +119,7 @@ from core import (
     calcular_saldo_conta_no_periodo,
     calcular_fatura_cartao_no_periodo,
     calcular_total_recorrentes_no_periodo,
+    periodo_fatura_hoje,
     configurar_firestore,
     firestore_ativo,
 )
@@ -162,18 +163,38 @@ dados = carregar_dados_usuario(usuario_atual)
 # Roda antes de qualquer aba ser desenhada, para que "Faturas em Aberto" e "Meus Gastos" no
 # Resumo já reflitam qualquer compra no cartão cujo mês da fatura já chegou — uma compra no
 # cartão é sempre cobrada automaticamente, não depende de o usuário marcar nada como "pago".
-_periodo_hoje_auto = f"{datetime.now().year}-{datetime.now().month:02d}"
 _houve_lancamento_auto = False
 for _item_auto in dados.get("gastos_fixos", []):
-    if (
-        _item_auto.get("metodo_pagamento") == "Cartao"
-        and not _item_auto.get("pago")
-        and _item_auto.get("periodo_fatura", "9999-99") <= _periodo_hoje_auto
-    ):
-        alterar_fatura(dados, _item_auto.get("cartao_nome", ""), _item_auto["valor"], "somar", data=_item_auto["data"])
-        _item_auto["pago"] = True
-        _houve_lancamento_auto = True
+    if _item_auto.get("metodo_pagamento") == "Cartao" and not _item_auto.get("pago"):
+        _cartao_do_item_auto = obter_dados_cartao(dados, _item_auto.get("cartao_nome", ""))
+        _periodo_hoje_do_cartao = periodo_fatura_hoje(_cartao_do_item_auto)
+        if _item_auto.get("periodo_fatura", "9999-99") <= _periodo_hoje_do_cartao:
+            alterar_fatura(dados, _item_auto.get("cartao_nome", ""), _item_auto["valor"], "somar", data=_item_auto["data"])
+            _item_auto["pago"] = True
+            _houve_lancamento_auto = True
 if _houve_lancamento_auto:
+    salvar_dados_usuario(usuario_atual, dados)
+
+# --- LANÇAMENTO AUTOMÁTICO DE DESPESAS RECORRENTES NO CARTÃO ---
+# Mesma ideia: uma despesa recorrente no cartão é cobrada automaticamente assim que a fatura
+# daquele mês abre — sem depender de o usuário visitar aquele mês específico na tela primeiro.
+_houve_lancamento_recorrente_auto = False
+for _rec_auto in dados.get("gastos_recorrentes", []):
+    if _rec_auto.get("metodo_pagamento") != "Cartao":
+        continue
+    _rec_auto.setdefault("periodos_lancados", [])
+    _periodo_hoje_rec_auto = periodo_fatura_hoje(obter_dados_cartao(dados, _rec_auto.get("cartao_nome", "")))
+    _periodo_percorrer_rec = _rec_auto["inicio"]
+    while _periodo_percorrer_rec <= _periodo_hoje_rec_auto and (
+        _rec_auto.get("fim") is None or _periodo_percorrer_rec < _rec_auto["fim"]
+    ):
+        if _periodo_percorrer_rec not in _rec_auto["periodos_lancados"]:
+            _valor_percorrer_rec = _rec_auto.get("valores_override", {}).get(_periodo_percorrer_rec, _rec_auto["valor"])
+            alterar_fatura(dados, _rec_auto.get("cartao_nome", ""), _valor_percorrer_rec, "somar", data=f"{_periodo_percorrer_rec}-01")
+            _rec_auto["periodos_lancados"].append(_periodo_percorrer_rec)
+            _houve_lancamento_recorrente_auto = True
+        _periodo_percorrer_rec = periodo_seguinte(_periodo_percorrer_rec)
+if _houve_lancamento_recorrente_auto:
     salvar_dados_usuario(usuario_atual, dados)
 
 # --- CABEÇALHO DO APP ---
@@ -754,14 +775,8 @@ with abas[2]:
             rec_metodo = rec.get("metodo_pagamento", "Saldo")
             rec_local = rec.get("conta", "Nu") if rec_metodo == "Saldo" else rec.get("cartao_nome", "Cartão Nu")
             rec.setdefault("periodos_lancados", [])
-
-            # CARTÃO: lança automaticamente na fatura assim que o mês aparece na tela (sem precisar marcar "pago"),
-            # mas só até o mês real de hoje — não pré-lança cobranças de meses futuros que ainda não chegaram.
-            periodo_hoje = f"{datetime.now().year}-{datetime.now().month:02d}"
-            if rec_metodo == "Cartao" and periodo_ativo not in rec["periodos_lancados"] and periodo_ativo <= periodo_hoje:
-                alterar_fatura(dados, rec_local, valor_mes_rec, "somar", data=f"{periodo_ativo}-01")
-                rec["periodos_lancados"].append(periodo_ativo)
-                salvar_dados_usuario(usuario_atual, dados)
+            # O lançamento automático na fatura já acontece no topo do arquivo, assim que os
+            # dados são carregados — aqui só precisamos saber se já foi lançado, pra exibir.
 
             col_d, col_v, col_p = st.columns([2, 1, 1])
             col_d.markdown(f"**{rec['descricao']}** 🔁\n\n*({rec_local})*")
@@ -788,8 +803,9 @@ with abas[2]:
                 if st.button("Salvar novo valor deste mês", key=f"btn_editval_rec_{rec['id']}"):
                     diff_rec = novo_valor_rec - valor_mes_rec
                     if rec_metodo == "Cartao":
-                        # Já foi lançado automaticamente acima nesta mesma execução; ajusta pela diferença
-                        if diff_rec != 0:
+                        # Só mexe na fatura se esse mês já tiver sido realmente lançado (senão a
+                        # fatura ainda nem existe e não há o que ajustar).
+                        if diff_rec != 0 and periodo_ativo in rec.get("periodos_lancados", []):
                             alterar_fatura(dados, rec_local, diff_rec, "somar", data=f"{periodo_ativo}-01")
                     elif pago_mes_rec and diff_rec != 0:
                         alterar_saldo(dados, rec_local, diff_rec, "subtrair")
