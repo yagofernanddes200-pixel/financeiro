@@ -100,844 +100,31 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- FUNÇÕES DE AUXÍLIO PARA DATAS ---
-def get_proximos_meses(data_inicial, parcelas):
-    """Retorna uma lista de strings 'AAAA-MM' para as parcelas futuras."""
-    datas = []
-    ano = data_inicial.year
-    mes = data_inicial.month
-    
-    for i in range(parcelas):
-        datas.append(f"{ano}-{mes:02d}")
-        mes += 1
-        if mes > 12:
-            mes = 1
-            ano += 1
-    return datas
-
-
-def formatar_data_br(data_iso):
-    """Converte 'AAAA-MM-DD' para 'DD/MM/AAAA'. Retorna o original se não conseguir converter."""
-    try:
-        return datetime.strptime(str(data_iso), "%Y-%m-%d").strftime("%d/%m/%Y")
-    except (ValueError, TypeError):
-        return str(data_iso)
-
-
-def periodo_anterior(periodo):
-    """Recebe 'AAAA-MM' e retorna o período do mês anterior."""
-    ano, mes = map(int, periodo.split("-"))
-    mes -= 1
-    if mes < 1:
-        mes = 12
-        ano -= 1
-    return f"{ano}-{mes:02d}"
-
-
-def periodo_seguinte(periodo):
-    """Recebe 'AAAA-MM' e retorna o período do mês seguinte."""
-    ano, mes = map(int, periodo.split("-"))
-    mes += 1
-    if mes > 12:
-        mes = 1
-        ano += 1
-    return f"{ano}-{mes:02d}"
-
-
-def calcular_periodo_fatura(data_iso, dia_fechamento):
-    """
-    Calcula em qual fatura (AAAA-MM) uma compra no cartão cai, considerando o dia de fechamento.
-    Se a compra ocorreu NO dia do fechamento ou depois, ela entra na fatura do mês seguinte.
-    """
-    try:
-        data_compra = datetime.strptime(str(data_iso), "%Y-%m-%d")
-    except (ValueError, TypeError):
-        return str(data_iso)[:7]
-
-    periodo_atual = f"{data_compra.year}-{data_compra.month:02d}"
-    if data_compra.day >= int(dia_fechamento):
-        return periodo_seguinte(periodo_atual)
-    return periodo_atual
-
-
-def obter_dados_cartao(dados, nome_cartao):
-    return next((c for c in dados.get("cartoes", []) if c["nome"] == nome_cartao), None)
-
-
-def pertence_periodo_cartao(item, periodo):
-    """
-    Verifica se um lançamento pertence a um período (AAAA-MM).
-    Usa o campo 'periodo_fatura' (calculado a partir do fechamento do cartão) quando existir;
-    caso contrário, cai de volta para a data literal do lançamento.
-    """
-    return item.get("periodo_fatura", str(item["data"])[:7]) == periodo
-
-
-def emprestimo_pendente_no_periodo(item, periodo):
-    """
-    Diz se um empréstimo/dívida de terceiro estava em aberto NAQUELE mês específico —
-    não existe antes de ter sido criado, e deixa de contar a partir do mês em que foi pago.
-    """
-    if str(item["data"])[:7] > periodo:
-        return False  # ainda não tinha sido feito naquele mês
-    if not item.get("pago"):
-        return True
-    data_pagamento = item.get("data_pagamento", item["data"])
-    return str(data_pagamento)[:7] > periodo
-
-
-def hash_resposta(resposta):
-    return hashlib.sha256(resposta.strip().lower().encode("utf-8")).hexdigest()
-
-
-PERGUNTAS_SEGURANCA_PADRAO = [
-    "Qual o nome do seu primeiro animal de estimação?",
-    "Qual o nome da cidade onde você nasceu?",
-    "Qual o nome dos seus filhos?",
-    "Qual o apelido que você tinha na infância?",
-    "Personalizada (escrever a minha própria pergunta)"
-]
-
-
-# --- FUNÇÕES PARA GERAÇÃO DE RELATÓRIOS (PDF & WORD) ---
-def gerar_relatorio_mensal_pdf(dados, periodo, mes_nome, ano, usuario_atual):
-    from fpdf import FPDF
-    from datetime import datetime
-    
-    # Filtrar dados do mês selecionado
-    receitas_mes = [r for r in dados.get("receitas", []) if r["data"].startswith(periodo)]
-    gastos_fixos_mes = [g for g in dados.get("gastos_fixos", []) if pertence_periodo_cartao(g, periodo)]
-    gastos_avulsos_mes = [g for g in dados.get("gastos_avulsos", []) if pertence_periodo_cartao(g, periodo)]
-    
-    total_receitas = sum(r["valor"] for r in receitas_mes)
-    total_fixos = sum(g["valor"] for g in gastos_fixos_mes)
-    total_avulsos = sum(g["valor"] for g in gastos_avulsos_mes)
-    total_gastos = total_fixos + total_avulsos
-    saldo_livre = total_receitas - total_gastos
-    
-    # Economias do mês
-    economias_mes = 0.0
-    for t in dados.get("transferencias", []):
-        if t["data"].startswith(periodo):
-            dest_tipo = next((c["tipo"] for c in dados["contas"] if c["nome"] == t["destino"]), "Normal")
-            orig_tipo = next((c["tipo"] for c in dados["contas"] if c["nome"] == t["origem"]), "Normal")
-            if dest_tipo == "Guardado" and orig_tipo == "Normal":
-                economias_mes += t["valor"]
-                
-    # Terceiros pendentes
-    unpaid_cartao = [t for t in dados.get("gastos_terceiros_cartao", []) if not t["pago"]]
-    unpaid_emprestimo = [e for e in dados.get("gastos_terceiros_emprestimo", []) if not e["pago"]]
-    
-    total_cartao_terceiros = sum(t["valor"] for t in unpaid_cartao if pertence_periodo_cartao(t, periodo))
-    total_emprestimos_pendentes = sum(e["valor"] for e in dados.get("gastos_terceiros_emprestimo", []) if emprestimo_pendente_no_periodo(e, periodo))
-    
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_margins(15, 15, 15)
-    pdf.set_text_color(32, 32, 36)
-    
-    # Cabeçalho
-    pdf.set_font("Helvetica", "B", 18)
-    pdf.cell(0, 10, "FINANCAS DIDATICAS - RELATORIO MENSAL", ln=True, align="C")
-    pdf.set_font("Helvetica", "", 12)
-    pdf.cell(0, 8, f"Mes de Referencia: {mes_nome} de {ano}", ln=True, align="C")
-    pdf.cell(0, 6, f"Usuario: {usuario_atual} | Gerado em: {datetime.now().strftime('%d/%m/%Y as %H:%M')}", ln=True, align="C")
-    pdf.ln(8)
-    
-    # Linha divisória Roxo
-    pdf.set_draw_color(130, 87, 229)
-    pdf.set_line_width(1)
-    pdf.line(15, pdf.get_y(), 195, pdf.get_y())
-    pdf.ln(6)
-    
-    # 1. Resumo Explicativo
-    pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(0, 8, "1. RESUMO EXPLICATIVO DO PERIODO", ln=True)
-    pdf.set_font("Helvetica", "", 10.5)
-    
-    texto = (
-        f"Durante o mes de {mes_nome} de {ano}, o perfil '{usuario_atual}' apresentou as seguintes movimentacoes:\n\n"
-        f"- Receitas Totais: Entrou um total de R$ {total_receitas:,.2f} em receitas cadastradas.\n"
-        f"- Custos Totais: O total de despesas reais pagas ou a pagar no mes somou R$ {total_gastos:,.2f}, dividindo-se em R$ {total_fixos:,.2f} de gastos fixos/parcelamentos e R$ {total_avulsos:,.2f} de gastos avulsos (dia a dia).\n"
-        f"- Balanco do Mes: O saldo livre apos abater as despesas foi de R$ {saldo_livre:,.2f}. "
-    )
-    if economias_mes > 0:
-        texto += f"Desse saldo livre, R$ {economias_mes:,.2f} foram transferidos e salvos em contas poupanca/guardados.\n"
-    else:
-        texto += "Nao foram registradas transferencias de economias para contas guardadas neste periodo.\n"
-        
-    texto += (
-        f"\nEm relacao a terceiros (amigos/familiares):\n"
-        f"- Cartao de Credito: Ha R$ {total_cartao_terceiros:,.2f} pendentes de reembolso em compras passadas no seu cartao para este mes.\n"
-        f"- Emprestimos Diretos: O montante pendente de reembolso acumulado por emprestimos diretos (PIX/dinheiro) e de R$ {total_emprestimos_pendentes:,.2f}."
-    )
-    
-    pdf.multi_cell(0, 5.5, texto.encode('latin-1', 'replace').decode('latin-1'))
-    pdf.ln(8)
-    
-    # 2. Tabela de Indicadores
-    pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(0, 8, "2. TABELA DE RESUMO MACRO DO MES", ln=True)
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.set_fill_color(240, 242, 246)
-    pdf.cell(100, 8, "Categoria de Fluxo", 1, 0, "L", fill=True)
-    pdf.cell(80, 8, "Valor (R$)", 1, 1, "R", fill=True)
-    
-    pdf.set_font("Helvetica", "", 10)
-    indicadores = [
-        ("Minhas Receitas (+)", total_receitas),
-        ("Gastos Fixos (-)", total_fixos),
-        ("Gastos Avulsos (-)", total_avulsos),
-        ("Saldo Livre", saldo_livre),
-        ("Economias Guardadas", economias_mes),
-        ("Fatura de Terceiros a Receber (Mes)", total_cartao_terceiros),
-        ("Emprestimos a Receber (Geral)", total_emprestimos_pendentes)
-    ]
-    for ind, val in indicadores:
-        pdf.cell(100, 8, ind.encode('latin-1', 'replace').decode('latin-1'), 1, 0, "L")
-        pdf.cell(80, 8, f"R$ {val:,.2f}", 1, 1, "R")
-        
-    pdf.ln(8)
-    
-    # 3. Contas e Saldos
-    pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(0, 8, "3. INTEGRACAO DE CONTAS, SALDOS E CARTOES", ln=True)
-    pdf.set_font("Helvetica", "", 10.5)
-    pdf.multi_cell(0, 5.5, "Contas bancarias com seus saldos de fechamento atuais e faturas de cartoes de credito pendentes:".encode('latin-1', 'replace').decode('latin-1'))
-    pdf.ln(2)
-    
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.set_fill_color(240, 242, 246)
-    pdf.cell(100, 8, "Conta / Banco / Cartao", 1, 0, "L", fill=True)
-    pdf.cell(40, 8, "Tipo", 1, 0, "C", fill=True)
-    pdf.cell(40, 8, "Saldo / Fatura (R$)", 1, 1, "R", fill=True)
-    
-    pdf.set_font("Helvetica", "", 10)
-    for conta in dados.get("contas", []):
-        pdf.cell(100, 8, conta["nome"].encode('latin-1', 'replace').decode('latin-1'), 1, 0, "L")
-        pdf.cell(40, 8, conta.get("tipo", "Normal"), 1, 0, "C")
-        pdf.cell(40, 8, f"R$ {conta['saldo']:,.2f}", 1, 1, "R")
-        
-    for cartao in dados.get("cartoes", []):
-        pdf.cell(100, 8, (f"Cartao {cartao['nome']}").encode('latin-1', 'replace').decode('latin-1'), 1, 0, "L")
-        pdf.cell(40, 8, "Cartao", 1, 0, "C")
-        pdf.cell(40, 8, f"R$ {cartao['fatura']:,.2f}", 1, 1, "R")
-        
-    # 4. Saldos a Receber de Terceiros
-    pdf.ln(8)
-    pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(0, 8, "4. SALDOS A RECEBER DE TERCEIROS (DEVEDORES)", ln=True)
-    
-    nomes_devedores = sorted(list(set([t["nome"] for t in unpaid_cartao] + [e["nome"] for e in unpaid_emprestimo])))
-    
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.set_fill_color(240, 242, 246)
-    pdf.cell(100, 8, "Pessoa / Devedor", 1, 0, "L", fill=True)
-    pdf.cell(80, 8, "Total Devido (R$)", 1, 1, "R", fill=True)
-    
-    pdf.set_font("Helvetica", "", 10)
-    if not nomes_devedores:
-        pdf.cell(180, 8, "Nao ha saldos pendentes de terceiros neste periodo.", 1, 1, "C")
-    else:
-        for nome_dev in nomes_devedores:
-            total_dev = sum(t["valor"] for t in unpaid_cartao if t["nome"].lower() == nome_dev.lower()) + sum(e["valor"] for e in unpaid_emprestimo if e["nome"].lower() == nome_dev.lower())
-            pdf.cell(100, 8, nome_dev.encode('latin-1', 'replace').decode('latin-1'), 1, 0, "L")
-            pdf.cell(80, 8, f"R$ {total_dev:,.2f}", 1, 1, "R")
-            
-    return bytes(pdf.output())
-
-def gerar_relatorio_mensal_docx(dados, periodo, mes_nome, ano, usuario_atual):
-    import docx
-    from docx.shared import Inches, Pt, RGBColor
-    import io
-    
-    # Filtrar dados do mês selecionado
-    receitas_mes = [r for r in dados.get("receitas", []) if r["data"].startswith(periodo)]
-    gastos_fixos_mes = [g for g in dados.get("gastos_fixos", []) if pertence_periodo_cartao(g, periodo)]
-    gastos_avulsos_mes = [g for g in dados.get("gastos_avulsos", []) if pertence_periodo_cartao(g, periodo)]
-    
-    total_receitas = sum(r["valor"] for r in receitas_mes)
-    total_fixos = sum(g["valor"] for g in gastos_fixos_mes)
-    total_avulsos = sum(g["valor"] for g in gastos_avulsos_mes)
-    total_gastos = total_fixos + total_avulsos
-    saldo_livre = total_receitas - total_gastos
-    
-    # Economias
-    economias_mes = 0.0
-    for t in dados.get("transferencias", []):
-        if t["data"].startswith(periodo):
-            dest_tipo = next((c["tipo"] for c in dados["contas"] if c["nome"] == t["destino"]), "Normal")
-            orig_tipo = next((c["tipo"] for c in dados["contas"] if c["nome"] == t["origem"]), "Normal")
-            if dest_tipo == "Guardado" and orig_tipo == "Normal":
-                economias_mes += t["valor"]
-                
-    # Terceiros pendentes
-    unpaid_cartao = [t for t in dados.get("gastos_terceiros_cartao", []) if not t["pago"]]
-    unpaid_emprestimo = [e for e in dados.get("gastos_terceiros_emprestimo", []) if not e["pago"]]
-    
-    total_cartao_terceiros = sum(t["valor"] for t in unpaid_cartao if pertence_periodo_cartao(t, periodo))
-    total_emprestimos_pendentes = sum(e["valor"] for e in dados.get("gastos_terceiros_emprestimo", []) if emprestimo_pendente_no_periodo(e, periodo))
-    
-    doc = docx.Document()
-    
-    # Título do Relatório
-    title = doc.add_paragraph()
-    r_title = title.add_run(f"Relatório Financeiro Mensal - {mes_nome} / {ano}")
-    r_title.bold = True
-    r_title.font.size = Pt(18)
-    r_title.font.color.rgb = RGBColor(130, 87, 229)
-    
-    subtitle = doc.add_paragraph()
-    r_sub = subtitle.add_run(f"Finanças Didáticas | Usuário: {usuario_atual}\nGerado em: {datetime.now().strftime('%d/%m/%Y às %H:%M')}")
-    r_sub.font.size = Pt(11)
-    r_sub.font.italic = True
-    
-    doc.add_heading("1. Resumo Explicativo do Período", level=1)
-    p1 = doc.add_paragraph()
-    p1.add_run(f"Durante o mês de {mes_nome} de {ano}, o perfil '{usuario_atual}' realizou a organização financeira. A seguir, a análise do período:\n\n")
-    p1.add_run("Receitas Registradas: ").bold = True
-    p1.add_run(f"Entrou um montante de R$ {total_receitas:,.2f}.\n")
-    p1.add_run("Despesas do Mês: ").bold = True
-    p1.add_run(f"As despesas totalizaram R$ {total_gastos:,.2f}, compostas por R$ {total_fixos:,.2f} de custos fixos e R$ {total_avulsos:,.2f} de gastos avulsos.\n")
-    p1.add_run("Saldo Livre: ").bold = True
-    p1.add_run(f"O saldo livre restante foi de R$ {saldo_livre:,.2f}. ")
-    if economias_mes > 0:
-        p1.add_run(f"Destinou R$ {economias_mes:,.2f} para poupança.\n")
-    else:
-        p1.add_run("Não foram registrados lançamentos de economias direcionadas para a poupança neste mês.\n")
-        
-    p1.add_run("\nSobre Finanças de Terceiros:\n").bold = True
-    p1.add_run(f"- Cartão de Crédito: Há R$ {total_cartao_terceiros:,.2f} pendentes de reembolso neste mês.\n")
-    p1.add_run(f"- Empréstimos: O total pendente de devolução a você é de R$ {total_emprestimos_pendentes:,.2f}.\n")
-    
-    doc.add_heading("2. Tabela de Indicadores Financeiros", level=1)
-    table = doc.add_table(rows=1, cols=2)
-    table.style = 'Table Grid'
-    table.autofit = False
-    
-    hdr_cells = table.rows[0].cells
-    hdr_cells[0].text = 'Indicador'
-    hdr_cells[0].paragraphs[0].runs[0].font.bold = True
-    hdr_cells[1].text = 'Valor (R$)'
-    hdr_cells[1].paragraphs[0].runs[0].font.bold = True
-    
-    indicadores = [
-        ("Minhas Receitas (+)", total_receitas),
-        ("Gastos Fixos (-)", total_fixos),
-        ("Gastos Avulsos (-)", total_avulsos),
-        ("Saldo Livre", saldo_livre),
-        ("Economias Guardadas", economias_mes),
-        ("Fatura de Terceiros a Receber (Mes)", total_cartao_terceiros),
-        ("Empréstimos a Receber (Geral)", total_emprestimos_pendentes)
-    ]
-    for ind, val in indicadores:
-        row_cells = table.add_row().cells
-        row_cells[0].text = ind
-        row_cells[1].text = f"R$ {val:,.2f}"
-        
-    for row in table.rows:
-        row.cells[0].width = Inches(4.5)
-        row.cells[1].width = Inches(2.0)
-        
-    doc.add_paragraph("\n")
-    doc.add_heading("3. Fechamento das Contas, Saldos e Cartões", level=1)
-    doc.add_paragraph("Abaixo estão listados os bancos e faturas com seus respectivos valores atuais:")
-    
-    table_contas = doc.add_table(rows=1, cols=3)
-    table_contas.style = 'Table Grid'
-    table_contas.autofit = False
-    
-    hdr_contas = table_contas.rows[0].cells
-    hdr_contas[0].text = 'Conta / Banco / Cartão'
-    hdr_contas[0].paragraphs[0].runs[0].font.bold = True
-    hdr_contas[1].text = 'Tipo'
-    hdr_contas[1].paragraphs[0].runs[0].font.bold = True
-    hdr_contas[2].text = 'Saldo / Fatura (R$)'
-    hdr_contas[2].paragraphs[0].runs[0].font.bold = True
-    
-    for conta in dados.get("contas", []):
-        row_cells = table_contas.add_row().cells
-        row_cells[0].text = conta["nome"]
-        row_cells[1].text = conta.get("tipo", "Normal")
-        row_cells[2].text = f"R$ {conta['saldo']:,.2f}"
-        
-    for cartao in dados.get("cartoes", []):
-        row_cells = table_contas.add_row().cells
-        row_cells[0].text = f"Cartão {cartao['nome']}"
-        row_cells[1].text = "Cartão de Crédito"
-        row_cells[2].text = f"R$ {cartao['fatura']:,.2f}"
-        
-    for row in table_contas.rows:
-        row.cells[0].width = Inches(3.0)
-        row.cells[1].width = Inches(1.5)
-        row.cells[2].width = Inches(2.0)
-        
-    # 4. Saldos a receber de terceiros
-    doc.add_paragraph("\n")
-    doc.add_heading("4. Saldos Pendentes por Devedor (Terceiros)", level=1)
-    
-    nomes_devedores = sorted(list(set([t["nome"] for t in unpaid_cartao] + [e["nome"] for e in unpaid_emprestimo])))
-    
-    table_dev = doc.add_table(rows=1, cols=2)
-    table_dev.style = 'Table Grid'
-    table_dev.autofit = False
-    
-    hdr_dev = table_dev.rows[0].cells
-    hdr_dev[0].text = 'Nome do Devedor'
-    hdr_dev[0].paragraphs[0].runs[0].font.bold = True
-    hdr_dev[1].text = 'Valor Total Devido (R$)'
-    hdr_dev[1].paragraphs[0].runs[0].font.bold = True
-    
-    if not nomes_devedores:
-        row_cells = table_dev.add_row().cells
-        row_cells[0].text = "Sem pendências"
-        row_cells[1].text = "R$ 0,00"
-    else:
-        for nome_dev in nomes_devedores:
-            total_dev = sum(t["valor"] for t in unpaid_cartao if t["nome"].lower() == nome_dev.lower()) + sum(e["valor"] for e in unpaid_emprestimo if e["nome"].lower() == nome_dev.lower())
-            row_cells = table_dev.add_row().cells
-            row_cells[0].text = nome_dev
-            row_cells[1].text = f"R$ {total_dev:,.2f}"
-            
-    for row in table_dev.rows:
-        row.cells[0].width = Inches(4.5)
-        row.cells[1].width = Inches(2.0)
-        
-    bio = io.BytesIO()
-    doc.save(bio)
-    return bio.getvalue()
-
-def gerar_relatorio_anual_pdf(dados, ano, meses_lista, usuario_atual):
-    from fpdf import FPDF
-    from datetime import datetime
-    
-    dados_ano = []
-    for m in range(1, 13):
-        prefixo_busca = f"{ano}-{m:02d}"
-        rec_ano = sum(r["valor"] for r in dados.get("receitas", []) if r["data"].startswith(prefixo_busca))
-        fix_ano = sum(g["valor"] for g in dados.get("gastos_fixos", []) if g["data"].startswith(prefixo_busca))
-        av_ano = sum(g["valor"] for g in dados.get("gastos_avulsos", []) if g["data"].startswith(prefixo_busca))
-        gastos_totais = fix_ano + av_ano
-        
-        # Calcular economias
-        economias_mes = 0.0
-        for t in dados.get("transferencias", []):
-            if t["data"].startswith(prefixo_busca):
-                dest_tipo = next((c["tipo"] for c in dados["contas"] if c["nome"] == t["destino"]), "Normal")
-                orig_tipo = next((c["tipo"] for c in dados["contas"] if c["nome"] == t["origem"]), "Normal")
-                if dest_tipo == "Guardado" and orig_tipo == "Normal":
-                    economias_mes += t["valor"]
-                    
-        dados_ano.append({
-            "mes_num": m,
-            "mes_nome": meses_lista[m-1],
-            "ganhos": rec_ano,
-            "gastos": gastos_totais,
-            "guardado": economias_mes,
-            "balanco": rec_ano - gastos_totais
-        })
-        
-    total_ganhos_ano = sum(d["ganhos"] for d in dados_ano)
-    total_gastos_ano = sum(d["gastos"] for d in dados_ano)
-    total_guardado_ano = sum(d["guardado"] for d in dados_ano)
-    saldo_anual_acumulado = total_ganhos_ano - total_gastos_ano
-    
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_margins(15, 15, 15)
-    pdf.set_text_color(32, 32, 36)
-    
-    # Cabeçalho
-    pdf.set_font("Helvetica", "B", 18)
-    pdf.cell(0, 10, "FINANCAS DIDATICAS - RELATORIO ANUAL CONSOLIDADO", ln=True, align="C")
-    pdf.set_font("Helvetica", "", 12)
-    pdf.cell(0, 8, f"Ano de Referencia: {ano}", ln=True, align="C")
-    pdf.cell(0, 6, f"Usuario: {usuario_atual} | Gerado em: {datetime.now().strftime('%d/%m/%Y as %H:%M')}", ln=True, align="C")
-    pdf.ln(8)
-    
-    # Linha divisória Roxo
-    pdf.set_draw_color(130, 87, 229)
-    pdf.set_line_width(1)
-    pdf.line(15, pdf.get_y(), 195, pdf.get_y())
-    pdf.ln(6)
-    
-    # 1. Resumo Explicativo do Ano
-    pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(0, 8, "1. RESUMO EXPLICATIVO DO ANO CONSOLIDADO", ln=True)
-    pdf.set_font("Helvetica", "", 10.5)
-    
-    texto = (
-        f"Este relatorio anual consolida a saude financeira do perfil '{usuario_atual}' ao longo de todo o ano de {ano}. "
-        f"Abaixo estao as explicacoes e as metricas acumuladas do periodo:\n\n"
-        f"- Ganhos Acumulados: Ao longo de todo o ano de {ano}, voce registrou um faturamento bruto acumulado de R$ {total_ganhos_ano:,.2f}.\n"
-        f"- Despesas Acumuladas: O total de despesas reais somou R$ {total_gastos_ano:,.2f} (englobando todas as contas fixas, parcelamentos e gastos avulsos).\n"
-        f"- Balanco Anual: O balanco financeiro liquido acumulado foi de R$ {saldo_anual_acumulado:,.2f}. "
-    )
-    if total_guardado_ano > 0:
-        texto += f"Durante o ano, voce conseguiu guardar com sucesso um total de R$ {total_guardado_ano:,.2f} em economias direcionadas para contas poupancas."
-    else:
-        texto += "Nao foram registradas transferencias de economias para poupancas de longo prazo durante o ano."
-        
-    pdf.multi_cell(0, 5.5, texto.encode('latin-1', 'replace').decode('latin-1'))
-    pdf.ln(8)
-    
-    # 2. Tabela de Consolidação Mensal
-    pdf.set_font("Helvetica", "B", 13)
-    pdf.cell(0, 8, "2. TABELA DE COMPOSICAO MES A MES", ln=True)
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.set_fill_color(240, 242, 246)
-    
-    pdf.cell(50, 8, "Mes", 1, 0, "L", fill=True)
-    pdf.cell(40, 8, "Ganhos (R$)", 1, 0, "R", fill=True)
-    pdf.cell(40, 8, "Gastos (R$)", 1, 0, "R", fill=True)
-    pdf.cell(50, 8, "Balanco Liquido (R$)", 1, 1, "R", fill=True)
-    
-    pdf.set_font("Helvetica", "", 10)
-    for d in dados_ano:
-        pdf.cell(50, 8, d["mes_nome"].encode('latin-1', 'replace').decode('latin-1'), 1, 0, "L")
-        pdf.cell(40, 8, f"R$ {d['ganhos']:,.2f}", 1, 0, "R")
-        pdf.cell(40, 8, f"R$ {d['gastos']:,.2f}", 1, 0, "R")
-        pdf.cell(50, 8, f"R$ {d['balanco']:,.2f}", 1, 1, "R")
-        
-    pdf.set_font("Helvetica", "B", 10)
-    pdf.set_fill_color(230, 230, 235)
-    pdf.cell(50, 8, "TOTAL ANUAL", 1, 0, "L", fill=True)
-    pdf.cell(40, 8, f"R$ {total_ganhos_ano:,.2f}", 1, 0, "R", fill=True)
-    pdf.cell(40, 8, f"R$ {total_gastos_ano:,.2f}", 1, 0, "R", fill=True)
-    pdf.cell(50, 8, f"R$ {saldo_anual_acumulado:,.2f}", 1, 1, "R", fill=True)
-    
-    return bytes(pdf.output())
-
-def gerar_relatorio_anual_docx(dados, ano, meses_lista, usuario_atual):
-    import docx
-    from docx.shared import Inches, Pt, RGBColor
-    import io
-    from datetime import datetime
-    
-    dados_ano = []
-    for m in range(1, 13):
-        prefixo_busca = f"{ano}-{m:02d}"
-        rec_ano = sum(r["valor"] for r in dados.get("receitas", []) if r["data"].startswith(prefixo_busca))
-        fix_ano = sum(g["valor"] for g in dados.get("gastos_fixos", []) if g["data"].startswith(prefixo_busca))
-        av_ano = sum(g["valor"] for g in dados.get("gastos_avulsos", []) if g["data"].startswith(prefixo_busca))
-        gastos_totais = fix_ano + av_ano
-        
-        # Calcular economias
-        economias_mes = 0.0
-        for t in dados.get("transferencias", []):
-            if t["data"].startswith(prefixo_busca):
-                dest_tipo = next((c["tipo"] for c in dados["contas"] if c["nome"] == t["destino"]), "Normal")
-                orig_tipo = next((c["tipo"] for c in dados["contas"] if c["nome"] == t["origem"]), "Normal")
-                if dest_tipo == "Guardado" and orig_tipo == "Normal":
-                    economias_mes += t["valor"]
-                    
-        dados_ano.append({
-            "mes_nome": meses_lista[m-1],
-            "ganhos": rec_ano,
-            "gastos": gastos_totais,
-            "guardado": economias_mes,
-            "balanco": rec_ano - gastos_totais
-        })
-        
-    total_ganhos_ano = sum(d["ganhos"] for d in dados_ano)
-    total_gastos_ano = sum(d["gastos"] for d in dados_ano)
-    total_guardado_ano = sum(d["guardado"] for d in dados_ano)
-    saldo_anual_acumulado = total_ganhos_ano - total_gastos_ano
-    
-    doc = docx.Document()
-    
-    # Título do Relatório
-    title = doc.add_paragraph()
-    r_title = title.add_run(f"Relatório Financeiro Anual Consolidado - {ano}")
-    r_title.bold = True
-    r_title.font.size = Pt(18)
-    r_title.font.color.rgb = RGBColor(130, 87, 229)
-    
-    subtitle = doc.add_paragraph()
-    r_sub = subtitle.add_run(f"Finanças Didáticas | Usuário: {usuario_atual}\nGerado em: {datetime.now().strftime('%d/%m/%Y às %H:%M')}")
-    r_sub.font.size = Pt(11)
-    r_sub.font.italic = True
-    
-    doc.add_heading("1. Resumo Explicativo do Ano", level=1)
-    p1 = doc.add_paragraph()
-    p1.add_run(f"O presente relatório consolida o desempenho financeiro do perfil '{usuario_atual}' ao longo do ano de {ano}. A seguir, apresenta-se a síntese geral das movimentações:\n\n")
-    p1.add_run("Ganhos Anuais Acumulados: ").bold = True
-    p1.add_run(f"O faturamento bruto do ano somou R$ {total_ganhos_ano:,.2f}.\n")
-    p1.add_run("Despesas Anuais Acumuladas: ").bold = True
-    p1.add_run(f"O montante de saídas reais somou R$ {total_gastos_ano:,.2f}.\n")
-    p1.add_run("Balanço Anual: ").bold = True
-    p1.add_run(f"O balanço financeiro líquido acumulado foi de R$ {saldo_anual_acumulado:,.2f}. ")
-    if total_guardado_ano > 0:
-        p1.add_run(f"Deste valor, R$ {total_guardado_ano:,.2f} foram economizados com sucesso nas contas de poupança/investimentos (Guardados).\n")
-    else:
-        p1.add_run("Não foram registradas transferências de economias direcionadas para a poupança neste ano.\n")
-        
-    doc.add_heading("2. Detalhamento Mensal (Mês a Mês)", level=1)
-    
-    table = doc.add_table(rows=1, cols=4)
-    table.style = 'Table Grid'
-    table.autofit = False
-    
-    hdr_cells = table.rows[0].cells
-    hdr_cells[0].text = 'Mês'
-    hdr_cells[0].paragraphs[0].runs[0].font.bold = True
-    hdr_cells[1].text = 'Ganhos (R$)'
-    hdr_cells[1].paragraphs[0].runs[0].font.bold = True
-    hdr_cells[2].text = 'Gastos (R$)'
-    hdr_cells[2].paragraphs[0].runs[0].font.bold = True
-    hdr_cells[3].text = 'Balanço Líquido (R$)'
-    hdr_cells[3].paragraphs[0].runs[0].font.bold = True
-    
-    for d in dados_ano:
-        row_cells = table.add_row().cells
-        row_cells[0].text = d["mes_nome"]
-        row_cells[1].text = f"R$ {d['ganhos']:,.2f}"
-        row_cells[2].text = f"R$ {d['gastos']:,.2f}"
-        row_cells[3].text = f"R$ {d['balanco']:,.2f}"
-        
-    # Linha final de total
-    total_row = table.add_row().cells
-    total_row[0].text = "TOTAL ANUAL"
-    total_row[0].paragraphs[0].runs[0].font.bold = True
-    total_row[1].text = f"R$ {total_ganhos_ano:,.2f}"
-    total_row[1].paragraphs[0].runs[0].font.bold = True
-    total_row[2].text = f"R$ {total_gastos_ano:,.2f}"
-    total_row[2].paragraphs[0].runs[0].font.bold = True
-    total_row[3].text = f"R$ {saldo_anual_acumulado:,.2f}"
-    total_row[3].paragraphs[0].runs[0].font.bold = True
-    
-    for row in table.rows:
-        row.cells[0].width = Inches(2.0)
-        row.cells[1].width = Inches(1.5)
-        row.cells[2].width = Inches(1.5)
-        row.cells[3].width = Inches(1.5)
-        
-    bio = io.BytesIO()
-    doc.save(bio)
-    return bio.getvalue()
-
-# --- CONTROLE DE MULTIPERFIS E SEGURANÇA ---
-def obter_caminho_dados(usuario):
-    nome_limpo = usuario.lower().strip().replace(" ", "_")
-    return f"dados_financeiros_{nome_limpo}.json"
-
-def carregar_dados_usuario(usuario):
-    caminho = obter_caminho_dados(usuario)
-    if os.path.exists(caminho):
-        try:
-            with open(caminho, "r", encoding="utf-8") as f:
-                dados = json.load(f)
-        except:
-            dados = {}
-    else:
-        dados = {}
-        
-    # Inicialização padrão de chaves para segurança
-    pin_padrao = "123456" if usuario.lower() == "yago" else "654321" if usuario.lower() == "binete" else "123456"
-    dados.setdefault("pin", pin_padrao)
-    dados.setdefault("receitas", [])
-    dados.setdefault("gastos_fixos", [])
-    dados.setdefault("gastos_avulsos", [])
-    dados.setdefault("gastos_terceiros_cartao", [])
-    dados.setdefault("gastos_terceiros_emprestimo", [])
-    dados.setdefault("transferencias", [])
-    
-    # MIGRAR CONTAS ANTIGAS PARA ESTRUTURA DINÂMICA
-    if "contas" not in dados:
-        saldo_isolada = 0.0
-        saldo_caixinha = 0.0
-        if "conta_isolada" in dados:
-            saldo_isolada = dados["conta_isolada"].get("saldo_principal", 0.0)
-            saldo_caixinha = dados["conta_isolada"].get("caixinha_nu", 0.0)
-            
-        dados["contas"] = [
-            {"nome": "Nu", "saldo": 0.0, "tipo": "Normal"},
-            {"nome": "PicPay", "saldo": 0.0, "tipo": "Normal"},
-            {"nome": "Inter", "saldo": 0.0, "tipo": "Normal"},
-            {"nome": "Dinheiro", "saldo": 0.0, "tipo": "Normal"},
-            {"nome": "Banco Pan (Guardado)", "saldo": saldo_isolada, "tipo": "Guardado"},
-            {"nome": "Caixinha NU (Guardado)", "saldo": saldo_caixinha, "tipo": "Guardado"}
-        ]
-        
-    # MIGRAR CARTOES DE CRÉDITO DINÂMICOS
-    if "cartoes" not in dados:
-        dados["cartoes"] = [
-            {"nome": "Cartão Nu", "fatura": 0.0, "fechamento": 1, "vencimento": 10},
-            {"nome": "Cartão PicPay", "fatura": 0.0, "fechamento": 1, "vencimento": 10}
-        ]
-
-    # Garante que cartões antigos (criados antes desta versão) tenham fechamento/vencimento
-    for c in dados.get("cartoes", []):
-        c.setdefault("fechamento", 1)
-        c.setdefault("vencimento", 10)
-
-    # Migrar/garantir lista de gastos fixos recorrentes ("para sempre")
-    dados.setdefault("gastos_recorrentes", [])
-    for rec in dados["gastos_recorrentes"]:
-        rec.setdefault("fim", None)
-        rec.setdefault("pagamentos", {})
-        rec.setdefault("valores_override", {})
-        if "periodos_lancados" not in rec:
-            # Migração: meses que já estavam marcados como pagos no sistema antigo já tiveram a
-            # fatura lançada de verdade — marcamos como já lançados para não cobrar em dobro.
-            if rec.get("metodo_pagamento") == "Cartao":
-                rec["periodos_lancados"] = [p for p, v in rec["pagamentos"].items() if v]
-            else:
-                rec["periodos_lancados"] = []
-
-    # Migrar/garantir lista de dívidas recorrentes de terceiros no cartão (ex: assinatura dividida)
-    dados.setdefault("terceiros_recorrentes", [])
-    for rec in dados["terceiros_recorrentes"]:
-        rec.setdefault("fim", None)
-        rec.setdefault("pagamentos", {})
-        rec.setdefault("valores_override", {})
-
-    # Log de recebimentos de terceiros (para reconstrução de extrato mensal)
-    dados.setdefault("recebimentos_terceiros", [])
-
-    # Log de movimentações de fatura (para reconstrução mensal, igual ao extrato de contas)
-    dados.setdefault("fatura_movimentos", [])
-
-    # Migrar pergunta de segurança (recuperação de senha)
-    dados.setdefault("pergunta_seguranca", None)
-    dados.setdefault("resposta_hash", None)
-        
-    # Compatibilidade com faturas de cartão nas despesas antigas
-    for r in dados.get("receitas", []):
-        r.setdefault("conta", "Nu")
-        
-    for g in dados.get("gastos_fixos", []):
-        g.setdefault("metodo_pagamento", "Saldo")
-        g.setdefault("conta", "Nu")
-        g.setdefault("cartao_nome", "Cartão Nu")
-        
-    for a in dados.get("gastos_avulsos", []):
-        a.setdefault("metodo_pagamento", "Saldo")
-        a.setdefault("conta", "Nu")
-        a.setdefault("cartao_nome", "Cartão Nu")
-        
-    for t in dados.get("gastos_terceiros_cartao", []):
-        t.setdefault("cartao_nome", "Cartão Nu")
-        
-    return dados
-
-def salvar_dados_usuario(usuario, dados):
-    caminho = obter_caminho_dados(usuario)
-    with open(caminho, "w", encoding="utf-8") as f:
-        json.dump(dados, f, indent=4, ensure_ascii=False)
-
-# --- AUXILIARES DE MOVIMENTAÇÃO DE SALDO & FATURAS ---
-def alterar_saldo(dados, nome_conta, valor, operacao="somar"):
-    for conta in dados.setdefault("contas", []):
-        if conta["nome"] == nome_conta:
-            if operacao == "somar":
-                conta["saldo"] += valor
-            elif operacao == "subtrair":
-                conta["saldo"] -= valor
-            return True
-    return False
-
-def alterar_fatura(dados, nome_cartao, valor, operacao="somar", data=None):
-    if data is None:
-        data = str(datetime.now().date())
-    for cartao in dados.setdefault("cartoes", []):
-        if cartao["nome"] == nome_cartao:
-            valor_efetivo = valor if operacao == "somar" else -valor
-            if operacao == "somar":
-                cartao["fatura"] += valor
-            elif operacao == "subtrair":
-                novo_valor = cartao["fatura"] - valor
-                if novo_valor < 0:
-                    valor_efetivo = -cartao["fatura"]
-                    novo_valor = 0.0
-                cartao["fatura"] = novo_valor
-            dados.setdefault("fatura_movimentos", []).append({
-                "cartao_nome": nome_cartao,
-                "data": data,
-                "valor": valor_efetivo
-            })
-            return True
-    return False
-
-
-def calcular_fatura_cartao_no_periodo(dados, nome_cartao, periodo_fim):
-    """
-    Reconstrói a fatura de um cartão até o FIM de um período (AAAA-MM), a partir do
-    log de movimentações (mesma lógica usada para o saldo das contas).
-    """
-    cartao_obj = obter_dados_cartao(dados, nome_cartao)
-    if not cartao_obj:
-        return 0.0
-
-    movimentos = [m for m in dados.get("fatura_movimentos", []) if m.get("cartao_nome") == nome_cartao]
-    ajuste_total = sum(m["valor"] for m in movimentos)
-    ajuste_ate_periodo = sum(m["valor"] for m in movimentos if str(m["data"])[:7] <= periodo_fim)
-
-    base = cartao_obj["fatura"] - ajuste_total
-    fatura_reconstruida = base + ajuste_ate_periodo
-    return max(fatura_reconstruida, 0.0)
-
-
-def calcular_saldo_conta_no_periodo(dados, nome_conta, periodo_fim):
-    """
-    Reconstrói o saldo de uma conta até o FIM de um período (AAAA-MM), a partir do
-    histórico de lançamentos já registrados (mesma lógica de um extrato bancário:
-    saldo atual real, menos tudo que ainda não tinha acontecido até aquele mês).
-
-    OBS: usa a data/'período' nominal de cada lançamento (a data que você escolheu ao
-    cadastrar) como a data do movimento no livro-razão.
-    """
-    conta_obj = next((c for c in dados.get("contas", []) if c["nome"] == nome_conta), None)
-    if not conta_obj:
-        return 0.0
-
-    def per(data_str):
-        return str(data_str)[:7]
-
-    ajuste_total = 0.0        # soma de TODOS os movimentos já conhecidos (qualquer data)
-    ajuste_ate_periodo = 0.0  # soma apenas dos movimentos com data <= periodo_fim
-
-    def registrar(valor, data_evento):
-        nonlocal ajuste_total, ajuste_ate_periodo
-        ajuste_total += valor
-        if per(data_evento) <= periodo_fim:
-            ajuste_ate_periodo += valor
-
-    for r in dados.get("receitas", []):
-        if r.get("conta") == nome_conta:
-            registrar(r["valor"], r["data"])
-
-    for g in dados.get("gastos_fixos", []):
-        if g.get("metodo_pagamento") == "Saldo" and g.get("conta") == nome_conta and g.get("pago"):
-            registrar(-g["valor"], g["data"])
-
-    for rec in dados.get("gastos_recorrentes", []):
-        if rec.get("metodo_pagamento") == "Saldo" and rec.get("conta") == nome_conta:
-            for p, pago_flag in rec.get("pagamentos", {}).items():
-                if pago_flag:
-                    v = rec.get("valores_override", {}).get(p, rec["valor"])
-                    registrar(-v, f"{p}-01")
-
-    for a in dados.get("gastos_avulsos", []):
-        if a.get("metodo_pagamento") == "Saldo" and a.get("conta") == nome_conta:
-            registrar(-a["valor"], a["data"])
-
-    for t in dados.get("transferencias", []):
-        if t.get("origem") == nome_conta:
-            registrar(-t["valor"], t["data"])
-        if t.get("destino") == nome_conta:
-            registrar(t["valor"], t["data"])
-
-    for e in dados.get("gastos_terceiros_emprestimo", []):
-        if e.get("conta_origem") == nome_conta:
-            registrar(-e["valor"], e["data"])
-
-    for rt in dados.get("recebimentos_terceiros", []):
-        if rt.get("conta_destino") == nome_conta:
-            registrar(rt["valor"], rt["data"])
-
-    saldo_base = conta_obj["saldo"] - ajuste_total
-    return saldo_base + ajuste_ate_periodo
+from core import (
+    get_proximos_meses,
+    formatar_data_br,
+    periodo_anterior,
+    periodo_seguinte,
+    calcular_periodo_fatura,
+    obter_dados_cartao,
+    pertence_periodo_cartao,
+    emprestimo_pendente_no_periodo,
+    hash_resposta,
+    PERGUNTAS_SEGURANCA_PADRAO,
+    obter_caminho_dados,
+    carregar_dados_usuario,
+    salvar_dados_usuario,
+    alterar_saldo,
+    alterar_fatura,
+    calcular_saldo_conta_no_periodo,
+    calcular_fatura_cartao_no_periodo,
+)
+from relatorios import (
+    gerar_relatorio_mensal_pdf,
+    gerar_relatorio_mensal_docx,
+    gerar_relatorio_anual_pdf,
+    gerar_relatorio_anual_docx,
+)
 
 
 # --- INICIALIZAÇÃO DO ESTADO DA SESSÃO ---
@@ -1084,7 +271,7 @@ with col_a:
 periodo_ativo = f"{ano_selecionado}-{mes_num:02d}"
 
 # --- NAVEGAÇÃO POR ABAS (Mobile Friendly) ---
-abas = st.tabs(["📊 Resumo", "💵 Ganhos", "🏠 Fixas", "🛍️ Avulsos", "👥 Terceiros", "💳 Saldos", "🔒 Guardado", "⚙️ Senha"])
+abas = st.tabs(["📊 Resumo", "💵 Ganhos", "🏠 Gastos", "👥 Terceiros", "💳 Saldos", "🔒 Guardado", "⚙️ Senha"])
 
 # ----------------- ABA 1: RESUMO GERAL & RELATÓRIOS -----------------
 with abas[0]:
@@ -1369,10 +556,10 @@ with abas[1]:
                 salvar_dados_usuario(usuario_atual, dados)
                 st.rerun()
 
-# ----------------- ABA 3: MEUS GASTOS FIXOS -----------------
+# ----------------- ABA 3: MEUS GASTOS (únicos, parcelados e recorrentes) -----------------
 with abas[2]:
-    st.markdown("<h3 class='titulo-secao'>🏠 Meus Gastos Fixos & Parcelas</h3>", unsafe_allow_html=True)
-    st.caption("Gastos repetitivos ou parcelados de longo prazo.")
+    st.markdown("<h3 class='titulo-secao'>🏠 Meus Gastos</h3>", unsafe_allow_html=True)
+    st.caption("Gastos do dia a dia, parcelados ou recorrentes — tudo em um só lugar.")
 
     if "fixo_form_key" not in st.session_state:
         st.session_state.fixo_form_key = 0
@@ -1401,6 +588,14 @@ with abas[2]:
     total_parc = 1
     if tipo_despesa_fixa == "Parcelada (número fixo de parcelas)":
         total_parc = st.number_input("Número total de parcelas:", min_value=2, max_value=48, value=2, step=1, key=f"parc_fixo_{fk}")
+
+    data_gasto_unico = None
+    if tipo_despesa_fixa == "Única (só este mês)":
+        data_padrao_unico = datetime(ano_selecionado, mes_num, min(datetime.now().day, 28))
+        data_gasto_unico = st.date_input(
+            "Data do Gasto", data_padrao_unico, format="DD/MM/YYYY", key=f"data_unico_{fk}"
+        )
+        st.caption("No cartão, a data escolhida decide em qual fatura o gasto cai (antes ou depois do fechamento).")
 
     eh_recorrente_cartao = (tipo_despesa_fixa == "Recorrente (todo mês, até eu encerrar)" and metodo_p == "Cartão de Crédito")
     if eh_recorrente_cartao:
@@ -1455,13 +650,14 @@ with abas[2]:
                         else:
                             alterar_fatura(dados, cartao_pagamento, val, "somar", data=f"{periodo}-01")
             else:
+                data_evento_unico = str(data_gasto_unico) if data_gasto_unico else f"{periodo_ativo}-01"
                 periodo_fat_fixo = periodo_ativo
                 if metodo_salvar == "Cartao":
                     cartao_obj_fixo = obter_dados_cartao(dados, cartao_pagamento)
                     if cartao_obj_fixo:
-                        periodo_fat_fixo = calcular_periodo_fatura(f"{periodo_ativo}-01", cartao_obj_fixo.get("fechamento", 1))
+                        periodo_fat_fixo = calcular_periodo_fatura(data_evento_unico, cartao_obj_fixo.get("fechamento", 1))
                 novo_gasto = {
-                    "data": f"{periodo_ativo}-01",
+                    "data": data_evento_unico,
                     "descricao": desc,
                     "valor": val,
                     "pago": pago,
@@ -1635,114 +831,8 @@ with abas[2]:
                 salvar_dados_usuario(usuario_atual, dados)
                 st.rerun()
 
-# ----------------- ABA 4: GASTOS AVULSOS -----------------
+# ----------------- ABA 4: GASTOS DE TERCEIROS (CONTAS DE DEVEDORES POR PESSOA) -----------------
 with abas[3]:
-    st.markdown("<h3 class='titulo-secao'>🛍️ Meus Gastos Avulsos</h3>", unsafe_allow_html=True)
-    st.caption("Gastos diários variáveis (Ifood, Uber, Compras rápidas)")
-
-    if "avulso_form_key" not in st.session_state:
-        st.session_state.avulso_form_key = 0
-    fka = st.session_state.avulso_form_key
-
-    st.markdown("**Adicionar Gasto Avulso**")
-    desc = st.text_input("O que você comprou?", key=f"desc_av_{fka}")
-    val = st.number_input("Valor Pago (R$)", min_value=0.0, step=10.0, format="%.2f", key=f"val_av_{fka}")
-    
-    # INTEGRAÇÃO CARTÃO DE CRÉDITO DINÂMICO
-    metodo_p_av = st.selectbox("Forma de Pagamento:", ["Saldo em Conta", "Cartão de Crédito"], key=f"metodo_av_{fka}")
-    if metodo_p_av == "Saldo em Conta":
-        conta_pagamento_av = st.selectbox("Pagar com a Conta:", [c["nome"] for c in dados["contas"]], key=f"conta_av_{fka}")
-        cartao_pagamento_av = "Não se aplica"
-    else:
-        conta_pagamento_av = "Não se aplica"
-        cartao_pagamento_av = st.selectbox("Pagar com o Cartão:", [c["nome"] for c in dados["cartoes"]], key=f"cartao_av_{fka}")
-    
-    data_padrao = datetime(ano_selecionado, mes_num, min(datetime.now().day, 28))
-    data_gasto = st.date_input("Data do Gasto", data_padrao, format="DD/MM/YYYY", key=f"data_av_{fka}")
-    
-    if st.button("Salvar Gasto Avulso", key=f"salvar_av_{fka}"):
-        if desc and val > 0:
-            metodo_salvar = "Saldo" if metodo_p_av == "Saldo em Conta" else "Cartao"
-            periodo_fat_av = periodo_ativo
-            if metodo_salvar == "Cartao":
-                cartao_obj_av = obter_dados_cartao(dados, cartao_pagamento_av)
-                if cartao_obj_av:
-                    periodo_fat_av = calcular_periodo_fatura(str(data_gasto), cartao_obj_av.get("fechamento", 1))
-            novo_avulso = {
-                "data": str(data_gasto),
-                "descricao": desc,
-                "valor": val,
-                "metodo_pagamento": metodo_salvar,
-                "conta": conta_pagamento_av,
-                "cartao_nome": cartao_pagamento_av,
-                "periodo_fatura": periodo_fat_av
-            }
-            dados.setdefault("gastos_avulsos", []).append(novo_avulso)
-            
-            # Deduz ou adiciona na fatura
-            if metodo_salvar == "Saldo":
-                alterar_saldo(dados, conta_pagamento_av, val, "subtrair")
-            else:
-                alterar_fatura(dados, cartao_pagamento_av, val, "somar", data=novo_avulso["data"])
-            
-            salvar_dados_usuario(usuario_atual, dados)
-            st.session_state.avulso_form_key += 1
-            st.success("Gasto avulso adicionado!")
-            st.rerun()
-        else:
-            st.error("Preencha a descrição e um valor maior que zero.")
-
-    # Mostrar Gastos Avulsos
-    gastos_avulsos_mes = [g for g in dados.get("gastos_avulsos", []) if pertence_periodo_cartao(g, periodo_ativo)]
-    if gastos_avulsos_mes:
-        st.markdown("#### Seus Gastos Avulsos Registrados")
-
-        filtro_av = st.text_input("🔎 Buscar por descrição:", key="filtro_avulsos")
-
-        for idx, item in enumerate(dados["gastos_avulsos"]):
-            if not pertence_periodo_cartao(item, periodo_ativo):
-                continue
-            if filtro_av and filtro_av.lower() not in item["descricao"].lower():
-                continue
-
-            metodo_item = item.get("metodo_pagamento", "Saldo")
-            local_item = item.get("conta", "Nu") if metodo_item == "Saldo" else item.get("cartao_nome", "Cartão Nu")
-
-            col_d, col_v, col_del = st.columns([3, 2, 1])
-            col_d.markdown(f"**{item['descricao']}**\n\n*{formatar_data_br(item['data'])} — {local_item}*")
-            col_v.markdown(f"R$ {item['valor']:,.2f}")
-
-            confirm_key = f"confirma_del_av_{idx}"
-            if col_del.button("🗑️", key=f"del_av_{idx}", help="Excluir este lançamento"):
-                st.session_state[confirm_key] = True
-
-            if st.session_state.get(confirm_key):
-                st.warning(f"Excluir '{item['descricao']}' (R$ {item['valor']:,.2f})? O valor volta para '{local_item}'.")
-                c_sim, c_nao = st.columns(2)
-                if c_sim.button("Sim, excluir", key=f"conf_sim_av_{idx}"):
-                    if metodo_item == "Saldo":
-                        alterar_saldo(dados, local_item, item["valor"], "somar")
-                    else:
-                        alterar_fatura(dados, local_item, item["valor"], "subtrair", data=item["data"])
-                    dados["gastos_avulsos"].pop(idx)
-                    salvar_dados_usuario(usuario_atual, dados)
-                    del st.session_state[confirm_key]
-                    st.rerun()
-                if c_nao.button("Cancelar", key=f"conf_nao_av_{idx}"):
-                    del st.session_state[confirm_key]
-                    st.rerun()
-            st.markdown("---")
-
-        with st.expander("⚠️ Apagar todo o histórico de avulsos deste mês"):
-            st.caption("Atenção: isso remove todos os lançamentos do mês, sem estornar os saldos/faturas.")
-            confirma_limpar_av = st.checkbox("Confirmo que quero apagar tudo", key="chk_limpar_av")
-            if st.button("Limpar Histórico de Avulsos (Mês)", key="limpar_avulsos", disabled=not confirma_limpar_av):
-                dados["gastos_avulsos"] = [g for g in dados.get("gastos_avulsos", []) if not pertence_periodo_cartao(g, periodo_ativo)]
-                salvar_dados_usuario(usuario_atual, dados)
-                st.rerun()
-
-# ----------------- ABA 5: GASTOS DE TERCEIROS (CONTAS DE DEVEDORES POR PESSOA) -----------------
-with abas[4]:
     st.markdown("<h3 class='titulo-secao'>👥 Amigos & Terceiros (Faturas & Empréstimos)</h3>", unsafe_allow_html=True)
     
     sub_abas_terceiros = st.tabs(["➕ Cadastrar Lançamento", "👤 Contas dos Devedores", "✅ Reembolsos Recebidos"])
@@ -2337,8 +1427,8 @@ with abas[4]:
                             st.success(f"Histórico pago de {nome_rel} foi limpo.")
                             st.rerun()
 
-# ----------------- ABA 6: NOVA ABA SALDOS (CONTAS DINÂMICAS & FATURAS DE CARTÃO) -----------------
-with abas[5]:
+# ----------------- ABA 5: NOVA ABA SALDOS (CONTAS DINÂMICAS & FATURAS DE CARTÃO) -----------------
+with abas[4]:
     st.markdown("<h3 class='titulo-secao'>💳 Gestão de Contas, Saldos & Cartões</h3>", unsafe_allow_html=True)
     st.caption("Crie, edite e acompanhe seus saldos bancários e faturas de cartões de crédito.")
     
@@ -2617,8 +1707,8 @@ with abas[5]:
                         st.success("Cartão excluído!")
                         st.rerun()
 
-# ----------------- ABA 7: POUPANÇA (GUARDADO) -----------------
-with abas[6]:
+# ----------------- ABA 6: POUPANÇA (GUARDADO) -----------------
+with abas[5]:
     st.markdown("<h3 class='titulo-secao'>🔒 Dinheiro Guardado & Poupança</h3>", unsafe_allow_html=True)
     st.markdown("""
     <div class="card-didatico">
@@ -2687,8 +1777,8 @@ with abas[6]:
         df_dep.columns = ["Data", "Origem", "Destino (Guardado)", "Valor Guardado (R$)"]
         st.dataframe(df_dep, use_container_width=True)
 
-# ----------------- ABA 8: ALTERAÇÃO DE SENHA (PIN) -----------------
-with abas[7]:
+# ----------------- ABA 7: ALTERAÇÃO DE SENHA (PIN) -----------------
+with abas[6]:
     st.markdown("<h3 class='titulo-secao'>⚙️ Alterar Sua Senha (PIN)</h3>", unsafe_allow_html=True)
     st.caption("Sua senha garante a privacidade dos seus dados financeiros se outras pessoas usarem o mesmo aplicativo.")
     
