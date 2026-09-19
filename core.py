@@ -115,6 +115,21 @@ def calcular_periodo_fatura(data_iso, dia_fechamento):
     return periodo_atual
 
 
+def periodo_fatura_hoje(cartao_obj):
+    """
+    Diz qual fatura (AAAA-MM) está "aberta e acumulando compras" agora mesmo, para um cartão
+    específico — ou seja, em qual fatura uma compra feita neste exato momento cairia.
+
+    Isso depende do dia de fechamento de cada cartão: dois cartões com fechamentos diferentes
+    podem ter faturas "atuais" diferentes no mesmo dia (um já virou para o mês seguinte, o
+    outro ainda não). Por isso não dá pra usar simplesmente "o mês do calendário de hoje" como
+    referência ao decidir se uma fatura já deve ser lançada ou não.
+    """
+    if not cartao_obj:
+        return f"{datetime.now().year}-{datetime.now().month:02d}"
+    return calcular_periodo_fatura(str(datetime.now().date()), cartao_obj.get("fechamento", 1))
+
+
 def obter_dados_cartao(dados, nome_cartao):
     return next((c for c in dados.get("cartoes", []) if c["nome"] == nome_cartao), None)
 
