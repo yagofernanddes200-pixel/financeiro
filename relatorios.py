@@ -9,7 +9,7 @@ parâmetros (período, ano, nome do usuário) e devolvem os bytes do arquivo pro
 
 from datetime import datetime
 
-from core import pertence_periodo_cartao, emprestimo_pendente_no_periodo
+from core import pertence_periodo_cartao, emprestimo_pendente_no_periodo, calcular_total_recorrentes_no_periodo
 
 
 # --- FUNÇÕES PARA GERAÇÃO DE RELATÓRIOS (PDF & WORD) ---
@@ -25,7 +25,8 @@ def gerar_relatorio_mensal_pdf(dados, periodo, mes_nome, ano, usuario_atual):
     total_receitas = sum(r["valor"] for r in receitas_mes)
     total_fixos = sum(g["valor"] for g in gastos_fixos_mes)
     total_avulsos = sum(g["valor"] for g in gastos_avulsos_mes)
-    total_gastos = total_fixos + total_avulsos
+    total_recorrentes = calcular_total_recorrentes_no_periodo(dados, periodo)
+    total_gastos = total_fixos + total_avulsos + total_recorrentes
     saldo_livre = total_receitas - total_gastos
     
     # Economias do mês
@@ -71,7 +72,7 @@ def gerar_relatorio_mensal_pdf(dados, periodo, mes_nome, ano, usuario_atual):
     texto = (
         f"Durante o mes de {mes_nome} de {ano}, o perfil '{usuario_atual}' apresentou as seguintes movimentacoes:\n\n"
         f"- Receitas Totais: Entrou um total de R$ {total_receitas:,.2f} em receitas cadastradas.\n"
-        f"- Custos Totais: O total de despesas reais pagas ou a pagar no mes somou R$ {total_gastos:,.2f}, dividindo-se em R$ {total_fixos:,.2f} de gastos fixos/parcelamentos e R$ {total_avulsos:,.2f} de gastos avulsos (dia a dia).\n"
+        f"- Custos Totais: O total de despesas reais pagas ou a pagar no mes somou R$ {total_gastos:,.2f}, dividindo-se em R$ {total_fixos:,.2f} de gastos unicos/parcelamentos, R$ {total_recorrentes:,.2f} de despesas recorrentes (assinaturas, aluguel etc.) e R$ {total_avulsos:,.2f} de gastos avulsos (historico).\n"
         f"- Balanco do Mes: O saldo livre apos abater as despesas foi de R$ {saldo_livre:,.2f}. "
     )
     if economias_mes > 0:
@@ -101,6 +102,7 @@ def gerar_relatorio_mensal_pdf(dados, periodo, mes_nome, ano, usuario_atual):
         ("Minhas Receitas (+)", total_receitas),
         ("Gastos Fixos (-)", total_fixos),
         ("Gastos Avulsos (-)", total_avulsos),
+        ("Gastos Recorrentes (-)", total_recorrentes),
         ("Saldo Livre", saldo_livre),
         ("Economias Guardadas", economias_mes),
         ("Fatura de Terceiros a Receber (Mes)", total_cartao_terceiros),
@@ -172,7 +174,8 @@ def gerar_relatorio_mensal_docx(dados, periodo, mes_nome, ano, usuario_atual):
     total_receitas = sum(r["valor"] for r in receitas_mes)
     total_fixos = sum(g["valor"] for g in gastos_fixos_mes)
     total_avulsos = sum(g["valor"] for g in gastos_avulsos_mes)
-    total_gastos = total_fixos + total_avulsos
+    total_recorrentes = calcular_total_recorrentes_no_periodo(dados, periodo)
+    total_gastos = total_fixos + total_avulsos + total_recorrentes
     saldo_livre = total_receitas - total_gastos
     
     # Economias
@@ -211,7 +214,7 @@ def gerar_relatorio_mensal_docx(dados, periodo, mes_nome, ano, usuario_atual):
     p1.add_run("Receitas Registradas: ").bold = True
     p1.add_run(f"Entrou um montante de R$ {total_receitas:,.2f}.\n")
     p1.add_run("Despesas do Mês: ").bold = True
-    p1.add_run(f"As despesas totalizaram R$ {total_gastos:,.2f}, compostas por R$ {total_fixos:,.2f} de custos fixos e R$ {total_avulsos:,.2f} de gastos avulsos.\n")
+    p1.add_run(f"As despesas totalizaram R$ {total_gastos:,.2f}, compostas por R$ {total_fixos:,.2f} de custos únicos/parcelados, R$ {total_recorrentes:,.2f} de despesas recorrentes (assinaturas, aluguel etc.) e R$ {total_avulsos:,.2f} de gastos avulsos (histórico).\n")
     p1.add_run("Saldo Livre: ").bold = True
     p1.add_run(f"O saldo livre restante foi de R$ {saldo_livre:,.2f}. ")
     if economias_mes > 0:
@@ -238,6 +241,7 @@ def gerar_relatorio_mensal_docx(dados, periodo, mes_nome, ano, usuario_atual):
         ("Minhas Receitas (+)", total_receitas),
         ("Gastos Fixos (-)", total_fixos),
         ("Gastos Avulsos (-)", total_avulsos),
+        ("Gastos Recorrentes (-)", total_recorrentes),
         ("Saldo Livre", saldo_livre),
         ("Economias Guardadas", economias_mes),
         ("Fatura de Terceiros a Receber (Mes)", total_cartao_terceiros),
@@ -330,7 +334,8 @@ def gerar_relatorio_anual_pdf(dados, ano, meses_lista, usuario_atual):
         rec_ano = sum(r["valor"] for r in dados.get("receitas", []) if r["data"].startswith(prefixo_busca))
         fix_ano = sum(g["valor"] for g in dados.get("gastos_fixos", []) if g["data"].startswith(prefixo_busca))
         av_ano = sum(g["valor"] for g in dados.get("gastos_avulsos", []) if g["data"].startswith(prefixo_busca))
-        gastos_totais = fix_ano + av_ano
+        recorrentes_ano = calcular_total_recorrentes_no_periodo(dados, prefixo_busca)
+        gastos_totais = fix_ano + av_ano + recorrentes_ano
         
         # Calcular economias
         economias_mes = 0.0
@@ -383,7 +388,7 @@ def gerar_relatorio_anual_pdf(dados, ano, meses_lista, usuario_atual):
         f"Este relatorio anual consolida a saude financeira do perfil '{usuario_atual}' ao longo de todo o ano de {ano}. "
         f"Abaixo estao as explicacoes e as metricas acumuladas do periodo:\n\n"
         f"- Ganhos Acumulados: Ao longo de todo o ano de {ano}, voce registrou um faturamento bruto acumulado de R$ {total_ganhos_ano:,.2f}.\n"
-        f"- Despesas Acumuladas: O total de despesas reais somou R$ {total_gastos_ano:,.2f} (englobando todas as contas fixas, parcelamentos e gastos avulsos).\n"
+        f"- Despesas Acumuladas: O total de despesas reais somou R$ {total_gastos_ano:,.2f} (englobando gastos unicos, parcelamentos, despesas recorrentes e gastos avulsos do historico).\n"
         f"- Balanco Anual: O balanco financeiro liquido acumulado foi de R$ {saldo_anual_acumulado:,.2f}. "
     )
     if total_guardado_ano > 0:
@@ -433,7 +438,8 @@ def gerar_relatorio_anual_docx(dados, ano, meses_lista, usuario_atual):
         rec_ano = sum(r["valor"] for r in dados.get("receitas", []) if r["data"].startswith(prefixo_busca))
         fix_ano = sum(g["valor"] for g in dados.get("gastos_fixos", []) if g["data"].startswith(prefixo_busca))
         av_ano = sum(g["valor"] for g in dados.get("gastos_avulsos", []) if g["data"].startswith(prefixo_busca))
-        gastos_totais = fix_ano + av_ano
+        recorrentes_ano = calcular_total_recorrentes_no_periodo(dados, prefixo_busca)
+        gastos_totais = fix_ano + av_ano + recorrentes_ano
         
         # Calcular economias
         economias_mes = 0.0

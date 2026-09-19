@@ -118,6 +118,7 @@ from core import (
     alterar_fatura,
     calcular_saldo_conta_no_periodo,
     calcular_fatura_cartao_no_periodo,
+    calcular_total_recorrentes_no_periodo,
 )
 from relatorios import (
     gerar_relatorio_mensal_pdf,
@@ -138,6 +139,24 @@ if "autenticado" not in st.session_state:
 
 usuario_atual = st.session_state.usuario_ativo
 dados = carregar_dados_usuario(usuario_atual)
+
+# --- LANÇAMENTO AUTOMÁTICO DE COMPRAS NO CARTÃO (Única/Parcelada) ---
+# Roda antes de qualquer aba ser desenhada, para que "Faturas em Aberto" e "Meus Gastos" no
+# Resumo já reflitam qualquer compra no cartão cujo mês da fatura já chegou — uma compra no
+# cartão é sempre cobrada automaticamente, não depende de o usuário marcar nada como "pago".
+_periodo_hoje_auto = f"{datetime.now().year}-{datetime.now().month:02d}"
+_houve_lancamento_auto = False
+for _item_auto in dados.get("gastos_fixos", []):
+    if (
+        _item_auto.get("metodo_pagamento") == "Cartao"
+        and not _item_auto.get("pago")
+        and _item_auto.get("periodo_fatura", "9999-99") <= _periodo_hoje_auto
+    ):
+        alterar_fatura(dados, _item_auto.get("cartao_nome", ""), _item_auto["valor"], "somar", data=_item_auto["data"])
+        _item_auto["pago"] = True
+        _houve_lancamento_auto = True
+if _houve_lancamento_auto:
+    salvar_dados_usuario(usuario_atual, dados)
 
 # --- CABEÇALHO DO APP ---
 col_logo, col_titulo = st.columns([1, 4])
@@ -310,7 +329,8 @@ with abas[0]:
         total_receitas = sum(r["valor"] for r in receitas_mes)
         total_fixos = sum(g["valor"] for g in gastos_fixos_mes)
         total_avulsos = sum(g["valor"] for g in gastos_avulsos_mes)
-        total_gastos = total_fixos + total_avulsos
+        total_recorrentes = calcular_total_recorrentes_no_periodo(dados, periodo_ativo)
+        total_gastos = total_fixos + total_avulsos + total_recorrentes
         saldo_livre = total_receitas - total_gastos
         
         # Calcular total guardado nas contas do tipo "Guardado"
@@ -351,13 +371,15 @@ with abas[0]:
         with cont_graf:
             # Gráfico 1: Divisão das Despesas (Pizza)
             if total_gastos > 0:
-                st.markdown("#### 📈 Divisão das Despesas (Fixos vs. Avulsos)")
+                st.markdown("#### 📈 Divisão das Despesas (Fixos vs. Recorrentes vs. Avulsos)")
                 df_pizza = pd.DataFrame([
-                    {"Categoria": "Gastos Fixos", "Valor": total_fixos},
-                    {"Categoria": "Gastos Avulsos", "Valor": total_avulsos}
+                    {"Categoria": "Únicos/Parcelados", "Valor": total_fixos},
+                    {"Categoria": "Recorrentes", "Valor": total_recorrentes},
+                    {"Categoria": "Avulsos (histórico)", "Valor": total_avulsos}
                 ])
+                df_pizza = df_pizza[df_pizza["Valor"] > 0]
                 fig = px.pie(df_pizza, values="Valor", names="Categoria", hole=0.4,
-                             color_discrete_sequence=["#8257E5", "#FF4757"])
+                             color_discrete_sequence=["#8257E5", "#3867D6", "#FF4757"])
                 fig.update_layout(
                     paper_bgcolor='rgba(0,0,0,0)',
                     plot_bgcolor='rgba(0,0,0,0)',
@@ -428,7 +450,8 @@ with abas[0]:
             rec_ano = sum(r["valor"] for r in dados.get("receitas", []) if r["data"].startswith(prefixo_busca))
             fix_ano = sum(g["valor"] for g in dados.get("gastos_fixos", []) if g["data"].startswith(prefixo_busca))
             av_ano = sum(g["valor"] for g in dados.get("gastos_avulsos", []) if g["data"].startswith(prefixo_busca))
-            gastos_totais = fix_ano + av_ano
+            recorrentes_ano = calcular_total_recorrentes_no_periodo(dados, prefixo_busca)
+            gastos_totais = fix_ano + av_ano + recorrentes_ano
             dados_ano.append({
                 "Mês": meses_lista[m-1][:3],
                 "Ganhos": rec_ano,
@@ -597,12 +620,21 @@ with abas[2]:
         )
         st.caption("No cartão, a data escolhida decide em qual fatura o gasto cai (antes ou depois do fechamento).")
 
-    eh_recorrente_cartao = (tipo_despesa_fixa == "Recorrente (todo mês, até eu encerrar)" and metodo_p == "Cartão de Crédito")
-    if eh_recorrente_cartao:
-        st.caption("💳 Como é recorrente no cartão, ela entra automaticamente na fatura todo mês — não precisa marcar como paga.")
-        pago = False
+    eh_cartao = (metodo_p == "Cartão de Crédito")
+    eh_recorrente = (tipo_despesa_fixa == "Recorrente (todo mês, até eu encerrar)")
+    eh_unico = (tipo_despesa_fixa == "Única (só este mês)")
+
+    if eh_cartao:
+        if eh_recorrente:
+            st.caption("💳 Como é recorrente no cartão, ela entra automaticamente na fatura todo mês — não precisa marcar como paga.")
+        else:
+            st.caption("💳 Compra no cartão: entra automaticamente na fatura correspondente assim que ela abrir (igual uma compra de verdade no cartão) — não precisa marcar como paga.")
+        pago = False  # não decide o lançamento no cartão — isso é sempre automático (ver bloco de lançamento abaixo)
+    elif eh_unico:
+        st.caption("💰 Gasto único: o valor já sai do saldo da conta agora, como uma compra à vista.")
+        pago = True
     else:
-        pago = st.checkbox("Marcar já como pago neste mês?", key=f"pago_fixo_{fk}")
+        pago = st.checkbox("Marcar já como pago neste mês (1ª parcela)?", key=f"pago_fixo_{fk}")
 
     if st.button("Salvar Despesa", key=f"salvar_fixo_{fk}"):
         if desc and val > 0:
@@ -632,7 +664,10 @@ with abas[2]:
             elif tipo_despesa_fixa == "Parcelada (número fixo de parcelas)":
                 lista_periodos = get_proximos_meses(data_inicial, total_parc)
                 for i, periodo in enumerate(lista_periodos):
-                    status_pago_parc = pago if i == 0 else False
+                    # No cartão, nenhuma parcela é lançada aqui na hora — cada uma é debitada
+                    # automaticamente na fatura certa, quando aquele mês chegar (ver bloco de
+                    # lançamento automático logo abaixo, na exibição da lista).
+                    status_pago_parc = (pago if i == 0 else False) if metodo_salvar == "Saldo" else False
                     novo_gasto = {
                         "data": f"{periodo}-01",
                         "descricao": f"{desc} (Parc. {i+1}/{total_parc})",
@@ -644,11 +679,8 @@ with abas[2]:
                         "periodo_fatura": periodo
                     }
                     dados.setdefault("gastos_fixos", []).append(novo_gasto)
-                    if status_pago_parc:
-                        if metodo_salvar == "Saldo":
-                            alterar_saldo(dados, conta_pagamento, val, "subtrair")
-                        else:
-                            alterar_fatura(dados, cartao_pagamento, val, "somar", data=f"{periodo}-01")
+                    if metodo_salvar == "Saldo" and status_pago_parc:
+                        alterar_saldo(dados, conta_pagamento, val, "subtrair")
             else:
                 data_evento_unico = str(data_gasto_unico) if data_gasto_unico else f"{periodo_ativo}-01"
                 periodo_fat_fixo = periodo_ativo
@@ -660,18 +692,20 @@ with abas[2]:
                     "data": data_evento_unico,
                     "descricao": desc,
                     "valor": val,
-                    "pago": pago,
+                    # Saldo: já sai da conta na hora (pago=True sempre, é uma compra "à vista").
+                    # Cartão: começa como não lançado — o bloco de lançamento automático (abaixo,
+                    # na listagem) debita da fatura assim que o mês correspondente chegar.
+                    "pago": False if metodo_salvar == "Cartao" else True,
                     "metodo_pagamento": metodo_salvar,
                     "conta": conta_pagamento,
                     "cartao_nome": cartao_pagamento,
                     "periodo_fatura": periodo_fat_fixo
                 }
                 dados.setdefault("gastos_fixos", []).append(novo_gasto)
-                if pago:
-                    if metodo_salvar == "Saldo":
-                        alterar_saldo(dados, conta_pagamento, val, "subtrair")
-                    else:
-                        alterar_fatura(dados, cartao_pagamento, val, "somar", data=novo_gasto["data"])
+                if metodo_salvar == "Saldo":
+                    alterar_saldo(dados, conta_pagamento, val, "subtrair")
+                # Cartão: não lança aqui — o bloco de lançamento automático (na listagem
+                # abaixo) debita da fatura assim que o mês correspondente chegar.
                 
             salvar_dados_usuario(usuario_atual, dados)
             st.session_state.fixo_form_key += 1
@@ -775,24 +809,23 @@ with abas[2]:
                 item_local = item.get("conta", "Nu") if item_metodo == "Saldo" else item.get("cartao_nome", "Cartão Nu")
                 col_d.markdown(f"**{item['descricao']}**\n\n*({item_local})*")
                 col_v.markdown(f"R$ {item['valor']:,.2f}")
-                
-                status_pago = col_p.checkbox("Pago", value=item["pago"], key=f"fixo_{idx}_{periodo_ativo}")
-                if status_pago != item["pago"]:
-                    # Atualiza saldo ou fatura de cartão
-                    if status_pago: # Marcou pago agora
-                        if item_metodo == "Saldo":
+
+                if item_metodo == "Cartao":
+                    # Compra no cartão: sempre automática, sem toggle manual (igual às Recorrentes).
+                    if item["pago"]:
+                        col_p.caption("💳 Lançada na fatura")
+                    else:
+                        col_p.caption("💳 Aguardando fatura abrir")
+                else:
+                    status_pago = col_p.checkbox("Pago", value=item["pago"], key=f"fixo_{idx}_{periodo_ativo}")
+                    if status_pago != item["pago"]:
+                        if status_pago:  # Marcou pago agora
                             alterar_saldo(dados, item_local, item["valor"], "subtrair")
-                        else:
-                            alterar_fatura(dados, item_local, item["valor"], "somar", data=item["data"])
-                    else: # Desmarcou pagamento, estorna
-                        if item_metodo == "Saldo":
+                        else:  # Desmarcou pagamento, estorna
                             alterar_saldo(dados, item_local, item["valor"], "somar")
-                        else:
-                            alterar_fatura(dados, item_local, item["valor"], "subtrair", data=item["data"])
-                        
-                    dados["gastos_fixos"][idx]["pago"] = status_pago
-                    salvar_dados_usuario(usuario_atual, dados)
-                    st.rerun()
+                        dados["gastos_fixos"][idx]["pago"] = status_pago
+                        salvar_dados_usuario(usuario_atual, dados)
+                        st.rerun()
 
                 with st.expander(f"⚙️ Editar / Excluir '{item['descricao']}'"):
                     novo_valor_fixo = st.number_input(

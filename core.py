@@ -106,6 +106,24 @@ def hash_resposta(resposta):
     return hashlib.sha256(resposta.strip().lower().encode("utf-8")).hexdigest()
 
 
+def calcular_total_recorrentes_no_periodo(dados, periodo):
+    """
+    Soma o valor de todas as despesas recorrentes (aba Gastos, tipo "Recorrente") que
+    estavam ativas em um período (AAAA-MM) — ou seja, já tinham começado e ainda não
+    tinham sido encerradas naquele mês —, usando o valor específico daquele mês
+    (valores_override) quando ele existir, ou o valor padrão da recorrência.
+
+    Isso é usado para que "Meus Gastos" no Resumo e nos relatórios inclua também as
+    despesas recorrentes do mês (elas ficam numa lista separada de `gastos_fixos`,
+    então precisam ser somadas à parte).
+    """
+    total = 0.0
+    for r in dados.get("gastos_recorrentes", []):
+        if r["inicio"] <= periodo and (r.get("fim") is None or periodo < r["fim"]):
+            total += r.get("valores_override", {}).get(periodo, r["valor"])
+    return total
+
+
 PERGUNTAS_SEGURANCA_PADRAO = [
     "Qual o nome do seu primeiro animal de estimação?",
     "Qual o nome da cidade onde você nasceu?",
