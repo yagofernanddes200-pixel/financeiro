@@ -808,8 +808,20 @@ with abas[2]:
                 st.markdown("---")
                 confirma_del_rec = st.checkbox("Confirmo que quero excluir esta recorrência por completo", key=f"chk_del_rec_{rec['id']}")
                 if st.button("🗑️ Excluir recorrência por completo", key=f"del_rec_{rec['id']}", disabled=not confirma_del_rec):
+                    # Estorna tudo que essa recorrência já tinha lançado antes de apagar, senão
+                    # o valor fica "preso" na fatura/saldo mesmo depois de excluída.
+                    if rec_metodo == "Cartao":
+                        for periodo_lancado in rec.get("periodos_lancados", []):
+                            valor_lancado = rec.get("valores_override", {}).get(periodo_lancado, rec["valor"])
+                            alterar_fatura(dados, rec_local, valor_lancado, "subtrair", data=f"{periodo_lancado}-01")
+                    else:
+                        for periodo_pago, pago_flag in rec.get("pagamentos", {}).items():
+                            if pago_flag:
+                                valor_pago = rec.get("valores_override", {}).get(periodo_pago, rec["valor"])
+                                alterar_saldo(dados, rec_local, valor_pago, "somar")
                     dados["gastos_recorrentes"] = [r for r in dados["gastos_recorrentes"] if r["id"] != rec["id"]]
                     salvar_dados_usuario(usuario_atual, dados)
+                    st.success("Recorrência excluída e valores já lançados foram estornados.")
                     st.rerun()
             st.markdown("---")
 
@@ -1733,6 +1745,28 @@ with abas[4]:
                 salvar_dados_usuario(usuario_atual, dados)
                 st.success("Datas de fechamento/vencimento atualizadas!")
                 st.rerun()
+            st.markdown("---")
+
+            with st.expander("🛠️ Corrigir valor da fatura manualmente"):
+                st.caption(
+                    "Use isso só se a fatura ficou com um valor errado por causa de algum bug "
+                    "(por exemplo, um lançamento excluído que não estornou direito). Isso muda "
+                    "diretamente o valor da fatura, sem mexer no saldo de nenhuma conta."
+                )
+                novo_valor_fatura = st.number_input(
+                    "Valor correto da fatura:", min_value=0.0,
+                    value=float(cartao_obj_sel.get("fatura", 0.0)), step=1.0, format="%.2f",
+                    key="corrigir_fatura_valor"
+                )
+                if st.button("Aplicar correção na fatura", key="btn_corrigir_fatura"):
+                    diff_correcao = novo_valor_fatura - cartao_obj_sel.get("fatura", 0.0)
+                    if diff_correcao != 0:
+                        alterar_fatura(dados, cartao_selecionado, abs(diff_correcao), "somar" if diff_correcao > 0 else "subtrair")
+                        salvar_dados_usuario(usuario_atual, dados)
+                        st.success(f"Fatura corrigida para R$ {novo_valor_fatura:,.2f}!")
+                        st.rerun()
+                    else:
+                        st.info("O valor já está igual, nada para corrigir.")
             st.markdown("---")
 
             col_ren_c, col_exc_c = st.columns(2)
