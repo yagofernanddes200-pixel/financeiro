@@ -173,6 +173,19 @@ def pertence_periodo_cartao(item, periodo):
     return item.get("periodo_fatura", str(item["data"])[:7]) == periodo
 
 
+def emprestimo_pendente_no_periodo(item, periodo):
+    """
+    Diz se um empréstimo/dívida de terceiro estava em aberto NAQUELE mês específico —
+    não existe antes de ter sido criado, e deixa de contar a partir do mês em que foi pago.
+    """
+    if str(item["data"])[:7] > periodo:
+        return False  # ainda não tinha sido feito naquele mês
+    if not item.get("pago"):
+        return True
+    data_pagamento = item.get("data_pagamento", item["data"])
+    return str(data_pagamento)[:7] > periodo
+
+
 def hash_resposta(resposta):
     return hashlib.sha256(resposta.strip().lower().encode("utf-8")).hexdigest()
 
@@ -216,7 +229,7 @@ def gerar_relatorio_mensal_pdf(dados, periodo, mes_nome, ano, usuario_atual):
     unpaid_emprestimo = [e for e in dados.get("gastos_terceiros_emprestimo", []) if not e["pago"]]
     
     total_cartao_terceiros = sum(t["valor"] for t in unpaid_cartao if pertence_periodo_cartao(t, periodo))
-    total_emprestimos_pendentes = sum(e["valor"] for e in unpaid_emprestimo)
+    total_emprestimos_pendentes = sum(e["valor"] for e in dados.get("gastos_terceiros_emprestimo", []) if emprestimo_pendente_no_periodo(e, periodo))
     
     pdf = FPDF()
     pdf.add_page()
@@ -363,7 +376,7 @@ def gerar_relatorio_mensal_docx(dados, periodo, mes_nome, ano, usuario_atual):
     unpaid_emprestimo = [e for e in dados.get("gastos_terceiros_emprestimo", []) if not e["pago"]]
     
     total_cartao_terceiros = sum(t["valor"] for t in unpaid_cartao if pertence_periodo_cartao(t, periodo))
-    total_emprestimos_pendentes = sum(e["valor"] for e in unpaid_emprestimo)
+    total_emprestimos_pendentes = sum(e["valor"] for e in dados.get("gastos_terceiros_emprestimo", []) if emprestimo_pendente_no_periodo(e, periodo))
     
     doc = docx.Document()
     
@@ -764,6 +777,13 @@ def carregar_dados_usuario(usuario):
         rec.setdefault("fim", None)
         rec.setdefault("pagamentos", {})
         rec.setdefault("valores_override", {})
+        if "periodos_lancados" not in rec:
+            # Migração: meses que já estavam marcados como pagos no sistema antigo já tiveram a
+            # fatura lançada de verdade — marcamos como já lançados para não cobrar em dobro.
+            if rec.get("metodo_pagamento") == "Cartao":
+                rec["periodos_lancados"] = [p for p, v in rec["pagamentos"].items() if v]
+            else:
+                rec["periodos_lancados"] = []
 
     # Migrar/garantir lista de dívidas recorrentes de terceiros no cartão (ex: assinatura dividida)
     dados.setdefault("terceiros_recorrentes", [])
@@ -1114,7 +1134,7 @@ with abas[0]:
         unpaid_emprestimo = [e for e in dados.get("gastos_terceiros_emprestimo", []) if not e["pago"]]
         
         total_cartao_terceiros = sum(t["valor"] for t in unpaid_cartao if pertence_periodo_cartao(t, periodo_ativo))
-        total_emprestimos_pendentes = sum(e["valor"] for e in unpaid_emprestimo)
+        total_emprestimos_pendentes = sum(e["valor"] for e in dados.get("gastos_terceiros_emprestimo", []) if emprestimo_pendente_no_periodo(e, periodo_ativo))
         
         # Métricas na tela
         col_m1, col_m2 = st.columns(2)
@@ -1382,7 +1402,12 @@ with abas[2]:
     if tipo_despesa_fixa == "Parcelada (número fixo de parcelas)":
         total_parc = st.number_input("Número total de parcelas:", min_value=2, max_value=48, value=2, step=1, key=f"parc_fixo_{fk}")
 
-    pago = st.checkbox("Marcar já como pago neste mês?", key=f"pago_fixo_{fk}")
+    eh_recorrente_cartao = (tipo_despesa_fixa == "Recorrente (todo mês, até eu encerrar)" and metodo_p == "Cartão de Crédito")
+    if eh_recorrente_cartao:
+        st.caption("💳 Como é recorrente no cartão, ela entra automaticamente na fatura todo mês — não precisa marcar como paga.")
+        pago = False
+    else:
+        pago = st.checkbox("Marcar já como pago neste mês?", key=f"pago_fixo_{fk}")
 
     if st.button("Salvar Despesa", key=f"salvar_fixo_{fk}"):
         if desc and val > 0:
@@ -1400,14 +1425,14 @@ with abas[2]:
                     "inicio": periodo_ativo,
                     "fim": None,
                     "pagamentos": {periodo_ativo: pago},
-                    "valores_override": {}
+                    "valores_override": {},
+                    "periodos_lancados": []
                 }
                 dados.setdefault("gastos_recorrentes", []).append(novo_recorrente)
-                if pago:
-                    if metodo_salvar == "Saldo":
-                        alterar_saldo(dados, conta_pagamento, val, "subtrair")
-                    else:
-                        alterar_fatura(dados, cartao_pagamento, val, "somar", data=f"{periodo_ativo}-01")
+                if metodo_salvar == "Saldo" and pago:
+                    alterar_saldo(dados, conta_pagamento, val, "subtrair")
+                # Cartão: não lança aqui — o lançamento automático na fatura acontece
+                # assim que o mês aparecer na tela (ver bloco "Mostrar Gastos Recorrentes" abaixo)
 
             elif tipo_despesa_fixa == "Parcelada (número fixo de parcelas)":
                 lista_periodos = get_proximos_meses(data_inicial, total_parc)
@@ -1471,26 +1496,32 @@ with abas[2]:
             pago_mes_rec = rec["pagamentos"].get(periodo_ativo, False)
             rec_metodo = rec.get("metodo_pagamento", "Saldo")
             rec_local = rec.get("conta", "Nu") if rec_metodo == "Saldo" else rec.get("cartao_nome", "Cartão Nu")
+            rec.setdefault("periodos_lancados", [])
+
+            # CARTÃO: lança automaticamente na fatura assim que o mês aparece na tela (sem precisar marcar "pago"),
+            # mas só até o mês real de hoje — não pré-lança cobranças de meses futuros que ainda não chegaram.
+            periodo_hoje = f"{datetime.now().year}-{datetime.now().month:02d}"
+            if rec_metodo == "Cartao" and periodo_ativo not in rec["periodos_lancados"] and periodo_ativo <= periodo_hoje:
+                alterar_fatura(dados, rec_local, valor_mes_rec, "somar", data=f"{periodo_ativo}-01")
+                rec["periodos_lancados"].append(periodo_ativo)
+                salvar_dados_usuario(usuario_atual, dados)
 
             col_d, col_v, col_p = st.columns([2, 1, 1])
             col_d.markdown(f"**{rec['descricao']}** 🔁\n\n*({rec_local})*")
             col_v.markdown(f"R$ {valor_mes_rec:,.2f}")
-            novo_pago_rec = col_p.checkbox("Pago", value=pago_mes_rec, key=f"rec_pago_{rec['id']}_{periodo_ativo}")
 
-            if novo_pago_rec != pago_mes_rec:
-                if novo_pago_rec:
-                    if rec_metodo == "Saldo":
+            if rec_metodo == "Cartao":
+                col_p.caption("💳 Cobrada automaticamente")
+            else:
+                novo_pago_rec = col_p.checkbox("Pago", value=pago_mes_rec, key=f"rec_pago_{rec['id']}_{periodo_ativo}")
+                if novo_pago_rec != pago_mes_rec:
+                    if novo_pago_rec:
                         alterar_saldo(dados, rec_local, valor_mes_rec, "subtrair")
                     else:
-                        alterar_fatura(dados, rec_local, valor_mes_rec, "somar", data=f"{periodo_ativo}-01")
-                else:
-                    if rec_metodo == "Saldo":
                         alterar_saldo(dados, rec_local, valor_mes_rec, "somar")
-                    else:
-                        alterar_fatura(dados, rec_local, valor_mes_rec, "subtrair", data=f"{periodo_ativo}-01")
-                rec["pagamentos"][periodo_ativo] = novo_pago_rec
-                salvar_dados_usuario(usuario_atual, dados)
-                st.rerun()
+                    rec["pagamentos"][periodo_ativo] = novo_pago_rec
+                    salvar_dados_usuario(usuario_atual, dados)
+                    st.rerun()
 
             with st.expander(f"⚙️ Gerenciar '{rec['descricao']}'"):
                 novo_valor_rec = st.number_input(
@@ -1499,11 +1530,12 @@ with abas[2]:
                 )
                 if st.button("Salvar novo valor deste mês", key=f"btn_editval_rec_{rec['id']}"):
                     diff_rec = novo_valor_rec - valor_mes_rec
-                    if pago_mes_rec and diff_rec != 0:
-                        if rec_metodo == "Saldo":
-                            alterar_saldo(dados, rec_local, diff_rec, "subtrair")
-                        else:
+                    if rec_metodo == "Cartao":
+                        # Já foi lançado automaticamente acima nesta mesma execução; ajusta pela diferença
+                        if diff_rec != 0:
                             alterar_fatura(dados, rec_local, diff_rec, "somar", data=f"{periodo_ativo}-01")
+                    elif pago_mes_rec and diff_rec != 0:
+                        alterar_saldo(dados, rec_local, diff_rec, "subtrair")
                     rec["valores_override"][periodo_ativo] = novo_valor_rec
                     salvar_dados_usuario(usuario_atual, dados)
                     st.rerun()
