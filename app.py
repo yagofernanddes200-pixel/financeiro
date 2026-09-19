@@ -119,6 +119,8 @@ from core import (
     calcular_saldo_conta_no_periodo,
     calcular_fatura_cartao_no_periodo,
     calcular_total_recorrentes_no_periodo,
+    configurar_firestore,
+    firestore_ativo,
 )
 from relatorios import (
     gerar_relatorio_mensal_pdf,
@@ -127,6 +129,22 @@ from relatorios import (
     gerar_relatorio_anual_docx,
 )
 
+
+# --- LIGAR PERSISTÊNCIA EM NUVEM (FIRESTORE), SE CONFIGURADA NOS SECRETS ---
+# Se o segredo "firebase.credentials_json" existir (colado nas configurações do app no
+# Streamlit Cloud), os dados passam a ser salvos no Firestore em vez de arquivos locais,
+# sobrevivendo a qualquer reinicialização do servidor. Se não existir, o app continua
+# funcionando normalmente com arquivos .json locais, sem quebrar nada.
+if not firestore_ativo():
+    try:
+        if "firebase" in st.secrets and "credentials_json" in st.secrets["firebase"]:
+            _credenciais_firebase = json.loads(st.secrets["firebase"]["credentials_json"])
+            configurar_firestore(_credenciais_firebase)
+    except Exception as _erro_firebase:
+        st.warning(
+            f"⚠️ Não consegui conectar ao Firestore, usando armazenamento local temporário. "
+            f"Detalhe técnico: {_erro_firebase}"
+        )
 
 # --- INICIALIZAÇÃO DO ESTADO DA SESSÃO ---
 if "usuario_ativo" not in st.session_state:
