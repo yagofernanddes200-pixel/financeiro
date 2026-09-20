@@ -268,6 +268,11 @@ def carregar_dados_usuario(usuario):
         rec.setdefault("fim", None)
         rec.setdefault("pagamentos", {})
         rec.setdefault("valores_override", {})
+        if "periodos_lancados" not in rec:
+            # Migração: meses que já estavam marcados como "pago" no sistema antigo já tiveram
+            # a fatura lançada de verdade (o toggle antigo mexia na fatura) — marcamos como já
+            # lançados para não cobrar em dobro quando o lançamento automático passar a valer.
+            rec["periodos_lancados"] = [p for p, v in rec["pagamentos"].items() if v]
 
     # Log de recebimentos de terceiros (para reconstrução de extrato mensal)
     dados.setdefault("recebimentos_terceiros", [])
@@ -295,6 +300,9 @@ def carregar_dados_usuario(usuario):
         
     for t in dados.get("gastos_terceiros_cartao", []):
         t.setdefault("cartao_nome", "Cartão Nu")
+        # Migração: compras já existentes (do sistema antigo) já tinham sido lançadas na fatura
+        # do jeito antigo — marcamos como já lançadas para não cobrar em dobro.
+        t.setdefault("lancado", True)
         
     return dados
 
