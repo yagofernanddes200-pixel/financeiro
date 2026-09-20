@@ -384,9 +384,34 @@ with abas[0]:
     col_pl2.metric(f"🔒 Guardado/Poupança ({mes_selecionado}/{ano_selecionado})", f"R$ {saldo_guardado_contas:,.2f}")
 
     col_pl3, col_pl4 = st.columns(2)
-    col_pl3.metric(f"Faturas em Aberto ({mes_selecionado}/{ano_selecionado})", f"R$ {faturas_abertas:,.2f}")
+    col_pl3.metric(f"💳 Faturas em Aberto — total ({mes_selecionado}/{ano_selecionado})", f"R$ {faturas_abertas:,.2f}")
     col_pl4.metric("Patrimônio Líquido", f"R$ {patrimonio_liquido:,.2f}")
-    st.caption("Saldos de contas e faturas refletem o mês/ano selecionado no topo — uma fatura de junho não aparece como aberta em maio.")
+
+    with st.container():
+        st.markdown("###### 💳 Detalhamento das Faturas por Cartão")
+        fatura_total_real_hoje = sum(c.get("fatura", 0.0) for c in dados.get("cartoes", []))
+
+        for cartao_resumo in dados.get("cartoes", []):
+            fatura_no_mes_resumo = calcular_fatura_cartao_no_periodo(dados, cartao_resumo["nome"], periodo_ativo)
+            fatura_real_hoje_resumo = cartao_resumo.get("fatura", 0.0)
+            col_cr1, col_cr2, col_cr3 = st.columns([2, 1, 1])
+            col_cr1.markdown(f"**💳 {cartao_resumo['nome']}**")
+            col_cr2.metric(f"Aberto em {mes_selecionado[:3]}/{ano_selecionado}", f"R$ {fatura_no_mes_resumo:,.2f}")
+            col_cr3.metric("Real hoje", f"R$ {fatura_real_hoje_resumo:,.2f}")
+
+        st.markdown(f"**Soma de todos os cartões — fatura real de hoje: R$ {fatura_total_real_hoje:,.2f}**")
+        st.caption(
+            "'Aberto em [mês]' reconstrói o saldo até o FIM daquele mês (útil pra olhar meses passados ou futuros sem "
+            "se preocupar com a data de hoje). 'Real hoje' é o valor de verdade, agora, de cada cartão — é esse que "
+            "você usa quando for pagar a fatura de verdade. Os dois só coincidem quando o mês selecionado é o mês atual "
+            "e não há compras futuras já cadastradas."
+        )
+
+    st.caption(
+        "Saldos de contas e faturas refletem o mês/ano selecionado no topo — uma fatura de junho não aparece como aberta em maio. "
+        "⚠️ 'Faturas em Aberto' é o total que você ainda deve no cartão (vai se somando a cada compra e só diminui quando você paga em 'Pagar Fatura'). "
+        "Para ver o que foi gasto especificamente neste mês, olhe 'Meus Gastos' logo abaixo."
+    )
     st.markdown("---")
 
 
