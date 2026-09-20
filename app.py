@@ -197,6 +197,39 @@ for _rec_auto in dados.get("gastos_recorrentes", []):
 if _houve_lancamento_recorrente_auto:
     salvar_dados_usuario(usuario_atual, dados)
 
+# --- LANÇAMENTO AUTOMÁTICO DE COMPRAS DE TERCEIROS NO CARTÃO (Parcelada) ---
+# Mesma ideia da aba Gastos: cada parcela de uma compra de terceiro é debitada sozinha na
+# fatura certa, quando o mês dela chegar — independente de a pessoa já ter te reembolsado.
+_houve_lancamento_terc_auto = False
+for _item_terc_auto in dados.get("gastos_terceiros_cartao", []):
+    if not _item_terc_auto.get("lancado", True):
+        _cartao_terc_auto = obter_dados_cartao(dados, _item_terc_auto.get("cartao_nome", ""))
+        _periodo_hoje_terc_auto = periodo_fatura_hoje(_cartao_terc_auto)
+        if _item_terc_auto.get("periodo_fatura", "9999-99") <= _periodo_hoje_terc_auto:
+            alterar_fatura(dados, _item_terc_auto.get("cartao_nome", ""), _item_terc_auto["valor"], "somar", data=_item_terc_auto["data"])
+            _item_terc_auto["lancado"] = True
+            _houve_lancamento_terc_auto = True
+if _houve_lancamento_terc_auto:
+    salvar_dados_usuario(usuario_atual, dados)
+
+# --- LANÇAMENTO AUTOMÁTICO DE RECORRENTES DE TERCEIROS NO CARTÃO ---
+_houve_lancamento_terc_rec_auto = False
+for _rec_terc_auto in dados.get("terceiros_recorrentes", []):
+    _rec_terc_auto.setdefault("periodos_lancados", [])
+    _periodo_hoje_terc_rec_auto = periodo_fatura_hoje(obter_dados_cartao(dados, _rec_terc_auto.get("cartao_nome", "")))
+    _periodo_percorrer_terc_rec = _rec_terc_auto["inicio"]
+    while _periodo_percorrer_terc_rec <= _periodo_hoje_terc_rec_auto and (
+        _rec_terc_auto.get("fim") is None or _periodo_percorrer_terc_rec < _rec_terc_auto["fim"]
+    ):
+        if _periodo_percorrer_terc_rec not in _rec_terc_auto["periodos_lancados"]:
+            _valor_percorrer_terc_rec = _rec_terc_auto.get("valores_override", {}).get(_periodo_percorrer_terc_rec, _rec_terc_auto["valor"])
+            alterar_fatura(dados, _rec_terc_auto.get("cartao_nome", ""), _valor_percorrer_terc_rec, "somar", data=f"{_periodo_percorrer_terc_rec}-01")
+            _rec_terc_auto["periodos_lancados"].append(_periodo_percorrer_terc_rec)
+            _houve_lancamento_terc_rec_auto = True
+        _periodo_percorrer_terc_rec = periodo_seguinte(_periodo_percorrer_terc_rec)
+if _houve_lancamento_terc_rec_auto:
+    salvar_dados_usuario(usuario_atual, dados)
+
 # --- CABEÇALHO DO APP ---
 col_logo, col_titulo = st.columns([1, 4])
 with col_logo:
@@ -710,7 +743,17 @@ with abas[2]:
                 # assim que o mês aparecer na tela (ver bloco "Mostrar Gastos Recorrentes" abaixo)
 
             elif tipo_despesa_fixa == "Parcelada (número fixo de parcelas)":
-                lista_periodos = get_proximos_meses(data_inicial, total_parc)
+                periodo_inicial_parcela = periodo_ativo
+                if metodo_salvar == "Cartao":
+                    cartao_obj_parc = obter_dados_cartao(dados, cartao_pagamento)
+                    if cartao_obj_parc:
+                        # Mesma lógica da Única/Recorrente: se hoje já passou do fechamento
+                        # deste cartão, a 1ª parcela cai na fatura do mês seguinte, não neste.
+                        data_referencia_parc = f"{periodo_ativo}-{min(datetime.now().day, 28):02d}"
+                        periodo_inicial_parcela = calcular_periodo_fatura(data_referencia_parc, cartao_obj_parc.get("fechamento", 1))
+                lista_periodos = [periodo_inicial_parcela]
+                for _ in range(total_parc - 1):
+                    lista_periodos.append(periodo_seguinte(lista_periodos[-1]))
                 for i, periodo in enumerate(lista_periodos):
                     # No cartão, nenhuma parcela é lançada aqui na hora — cada uma é debitada
                     # automaticamente na fatura certa, quando aquele mês chegar (ver bloco de
@@ -955,31 +998,56 @@ with abas[3]:
             if tipo_lanc_terc == "Parcelada (número fixo de parcelas)":
                 total_parc_terc = st.number_input("Número de parcelas de terceiro:", min_value=2, max_value=48, value=2, step=1, key=f"parc_terc_{fkt}")
 
-            pago_terc = st.checkbox("Marcar já como paga esta parcela/mês?", key=f"pago_terc_{fkt}")
+            data_terc_unico = None
+            if tipo_lanc_terc == "Única (só este mês)":
+                data_padrao_terc = datetime(ano_selecionado, mes_num, min(datetime.now().day, 28))
+                data_terc_unico = st.date_input(
+                    "Data da Compra", data_padrao_terc, format="DD/MM/YYYY", key=f"data_terc_{fkt}"
+                )
+                st.caption("A data escolhida decide em qual fatura a compra cai (antes ou depois do fechamento).")
+
+            pago_terc = st.checkbox(
+                "A pessoa já te pagou essa parcela/mês?" if tipo_lanc_terc != "Recorrente (todo mês, até eu encerrar)"
+                else "A pessoa já te pagou o mês atual?",
+                key=f"pago_terc_{fkt}"
+            )
+            st.caption("Isso só controla se a pessoa já te reembolsou — a fatura do seu cartão é sempre atualizada automaticamente, independente disso.")
 
             if st.button("Salvar Lançamento", key=f"salvar_terc_{fkt}"):
                 if nome and desc and val > 0:
-                    data_inicial = datetime(ano_selecionado, mes_num, 1)
                     nome_formatado = nome.title().strip()
+                    cartao_obj_terc_form = obter_dados_cartao(dados, cartao_utilizado)
+                    fechamento_terc = cartao_obj_terc_form.get("fechamento", 1) if cartao_obj_terc_form else 1
 
                     if tipo_lanc_terc == "Recorrente (todo mês, até eu encerrar)":
+                        # Mesma lógica da Recorrente em "Gastos": se hoje já passou do fechamento
+                        # deste cartão, começa na fatura do mês seguinte, não neste.
+                        data_referencia_rt = f"{periodo_ativo}-{min(datetime.now().day, 28):02d}"
+                        periodo_inicio_rt = calcular_periodo_fatura(data_referencia_rt, fechamento_terc)
                         novo_terc_rec = {
                             "id": f"tercrec_{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
                             "nome": nome_formatado,
                             "descricao": desc,
                             "valor": val,
                             "cartao_nome": cartao_utilizado,
-                            "inicio": periodo_ativo,
+                            "inicio": periodo_inicio_rt,
                             "fim": None,
-                            "pagamentos": {periodo_ativo: pago_terc},
-                            "valores_override": {}
+                            "pagamentos": {periodo_inicio_rt: pago_terc},
+                            "valores_override": {},
+                            "periodos_lancados": []
                         }
                         dados.setdefault("terceiros_recorrentes", []).append(novo_terc_rec)
-                        if pago_terc:
-                            alterar_fatura(dados, cartao_utilizado, val, "somar", data=f"{periodo_ativo}-01")
+                        # Não lança a fatura aqui — isso acontece automaticamente assim que a
+                        # fatura de cada mês abrir (ver bloco de lançamento automático no topo).
 
                     elif tipo_lanc_terc == "Parcelada (número fixo de parcelas)":
-                        lista_periodos = get_proximos_meses(data_inicial, total_parc_terc)
+                        # Mesma lógica da Parcelada em "Gastos": a 1ª parcela já respeita o
+                        # fechamento do cartão pra decidir se cai neste mês ou no seguinte.
+                        data_referencia_parc_t = f"{periodo_ativo}-{min(datetime.now().day, 28):02d}"
+                        periodo_inicial_parc_t = calcular_periodo_fatura(data_referencia_parc_t, fechamento_terc)
+                        lista_periodos = [periodo_inicial_parc_t]
+                        for _ in range(total_parc_terc - 1):
+                            lista_periodos.append(periodo_seguinte(lista_periodos[-1]))
                         for i, periodo in enumerate(lista_periodos):
                             status_pago_parc = pago_terc if i == 0 else False
                             nova_compra = {
@@ -989,24 +1057,27 @@ with abas[3]:
                                 "valor": val,
                                 "pago": status_pago_parc,
                                 "cartao_nome": cartao_utilizado,
-                                "periodo_fatura": periodo
+                                "periodo_fatura": periodo,
+                                "lancado": (i == 0)
                             }
                             dados.setdefault("gastos_terceiros_cartao", []).append(nova_compra)
 
-                            # Aumenta a fatura do cartão
+                            # Só a 1ª parcela é lançada na hora; as seguintes entram sozinhas na
+                            # fatura certa quando aquele mês chegar (lançamento automático).
                             if i == 0:
                                 alterar_fatura(dados, cartao_utilizado, val, "somar", data=f"{periodo}-01")
                     else:
-                        cartao_obj_terc = obter_dados_cartao(dados, cartao_utilizado)
-                        periodo_fat_terc = calcular_periodo_fatura(f"{periodo_ativo}-01", cartao_obj_terc.get("fechamento", 1)) if cartao_obj_terc else periodo_ativo
+                        data_evento_terc = str(data_terc_unico) if data_terc_unico else f"{periodo_ativo}-01"
+                        periodo_fat_terc = calcular_periodo_fatura(data_evento_terc, fechamento_terc)
                         nova_compra = {
-                            "data": f"{periodo_ativo}-01",
+                            "data": data_evento_terc,
                             "nome": nome_formatado,
                             "descricao": desc,
                             "valor": val,
                             "pago": pago_terc,
                             "cartao_nome": cartao_utilizado,
-                            "periodo_fatura": periodo_fat_terc
+                            "periodo_fatura": periodo_fat_terc,
+                            "lancado": True
                         }
                         dados.setdefault("gastos_terceiros_cartao", []).append(nova_compra)
                         alterar_fatura(dados, cartao_utilizado, val, "somar", data=nova_compra["data"])
@@ -1146,7 +1217,7 @@ with abas[3]:
                                 col_edit_sim, col_edit_nao = st.columns(2)
                                 if col_edit_sim.button("Salvar novo valor", key=f"conf_{edit_key}"):
                                     diff_terc = novo_valor_terc - t["valor"]
-                                    if diff_terc != 0:
+                                    if diff_terc != 0 and t.get("lancado", True):
                                         alterar_fatura(dados, t.get("cartao_nome", ""), diff_terc, "somar", data=t["data"])
                                     dados["gastos_terceiros_cartao"][idx_terc]["valor"] = novo_valor_terc
                                     salvar_dados_usuario(usuario_atual, dados)
@@ -1170,7 +1241,8 @@ with abas[3]:
                                 )
                                 col_conv_sim, col_conv_nao = st.columns(2)
                                 if col_conv_sim.button("Confirmar conversão", key=f"conf_{conv_key}"):
-                                    alterar_fatura(dados, t.get("cartao_nome", ""), valor_total_conv, "subtrair")
+                                    if t.get("lancado", True):
+                                        alterar_fatura(dados, t.get("cartao_nome", ""), valor_total_conv, "subtrair")
                                     alterar_saldo(dados, conta_saida_conv, valor_total_conv, "subtrair")
                                     dados["gastos_terceiros_cartao"] = [g for g in dados["gastos_terceiros_cartao"] if g not in itens_a_converter]
                                     dados.setdefault("gastos_terceiros_emprestimo", []).append({
@@ -1200,7 +1272,7 @@ with abas[3]:
                                 )
                                 col_del_sim, col_del_nao = st.columns(2)
                                 if col_del_sim.button("Confirmar exclusão", key=f"conf_{del_key}"):
-                                    if motivo_del.startswith("Foi um erro"):
+                                    if motivo_del.startswith("Foi um erro") and t.get("lancado", True):
                                         alterar_fatura(dados, t.get("cartao_nome", ""), t["valor"], "subtrair", data=t["data"])
                                     dados["gastos_terceiros_cartao"].pop(idx_terc)
                                     salvar_dados_usuario(usuario_atual, dados)
@@ -1250,16 +1322,16 @@ with abas[3]:
                         for rec_t in debitos_rec_terc:
                             valor_mes_rt = rec_t["valores_override"].get(periodo_ativo, rec_t["valor"])
                             pago_mes_rt = rec_t["pagamentos"].get(periodo_ativo, False)
+                            ja_lancado_rt = periodo_ativo in rec_t.get("periodos_lancados", [])
 
                             col_rt1, col_rt2 = st.columns([3, 1])
-                            col_rt1.write(f"- **{rec_t['descricao']}** 🔁 — **R$ {valor_mes_rt:,.2f}** *({rec_t.get('cartao_nome', 'Cartão Nu')})*")
-                            novo_pago_rt = col_rt2.checkbox("Pago", value=pago_mes_rt, key=f"rt_pago_{rec_t['id']}_{periodo_ativo}")
+                            selo_lancamento = "💳 já na fatura" if ja_lancado_rt else "⏳ fatura ainda não abriu"
+                            col_rt1.write(f"- **{rec_t['descricao']}** 🔁 — **R$ {valor_mes_rt:,.2f}** *({rec_t.get('cartao_nome', 'Cartão Nu')})* · {selo_lancamento}")
+                            novo_pago_rt = col_rt2.checkbox("Já recebi", value=pago_mes_rt, key=f"rt_pago_{rec_t['id']}_{periodo_ativo}", help="A pessoa já te reembolsou por essa parcela deste mês?")
 
                             if novo_pago_rt != pago_mes_rt:
-                                if novo_pago_rt:
-                                    alterar_fatura(dados, rec_t.get("cartao_nome", ""), valor_mes_rt, "somar", data=f"{periodo_ativo}-01")
-                                else:
-                                    alterar_fatura(dados, rec_t.get("cartao_nome", ""), valor_mes_rt, "subtrair", data=f"{periodo_ativo}-01")
+                                # Isso só controla o reembolso da pessoa — a fatura do cartão é
+                                # sempre atualizada sozinha, independente disso (ver topo do arquivo).
                                 rec_t["pagamentos"][periodo_ativo] = novo_pago_rt
                                 salvar_dados_usuario(usuario_atual, dados)
                                 st.rerun()
@@ -1282,8 +1354,13 @@ with abas[3]:
                                 st.markdown("---")
                                 confirma_del_rt = st.checkbox("Confirmo que quero excluir esta recorrência por completo", key=f"chk_del_rt_{rec_t['id']}")
                                 if st.button("🗑️ Excluir recorrência por completo", key=f"del_rt_{rec_t['id']}", disabled=not confirma_del_rt):
+                                    # Estorna tudo que já tinha sido lançado na fatura antes de apagar.
+                                    for periodo_lancado_rt in rec_t.get("periodos_lancados", []):
+                                        valor_lancado_rt = rec_t.get("valores_override", {}).get(periodo_lancado_rt, rec_t["valor"])
+                                        alterar_fatura(dados, rec_t.get("cartao_nome", ""), valor_lancado_rt, "subtrair", data=f"{periodo_lancado_rt}-01")
                                     dados["terceiros_recorrentes"] = [r for r in dados["terceiros_recorrentes"] if r["id"] != rec_t["id"]]
                                     salvar_dados_usuario(usuario_atual, dados)
+                                    st.success("Recorrência excluída e valores já lançados na fatura foram estornados.")
                                     st.rerun()
                             
                     st.markdown("---")
@@ -1731,6 +1808,8 @@ with abas[4]:
                         for t in dados.get("transferencias", []):
                             if t.get("origem") == conta_selecionada: t["origem"] = novo_nome_conta
                             if t.get("destino") == conta_selecionada: t["destino"] = novo_nome_conta
+                        for rg in dados.get("gastos_recorrentes", []):
+                            if rg.get("conta") == conta_selecionada: rg["conta"] = novo_nome_conta
                         salvar_dados_usuario(usuario_atual, dados)
                         st.success("Conta renomeada!")
                         st.rerun()
@@ -1801,6 +1880,10 @@ with abas[4]:
                             if a.get("cartao_nome") == cartao_selecionado: a["cartao_nome"] = novo_nome_cartao
                         for t in dados.get("gastos_terceiros_cartao", []):
                             if t.get("cartao_nome") == cartao_selecionado: t["cartao_nome"] = novo_nome_cartao
+                        for rg in dados.get("gastos_recorrentes", []):
+                            if rg.get("cartao_nome") == cartao_selecionado: rg["cartao_nome"] = novo_nome_cartao
+                        for rt in dados.get("terceiros_recorrentes", []):
+                            if rt.get("cartao_nome") == cartao_selecionado: rt["cartao_nome"] = novo_nome_cartao
                         salvar_dados_usuario(usuario_atual, dados)
                         st.success("Cartão renomeado!")
                         st.rerun()
